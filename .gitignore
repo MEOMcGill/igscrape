@@ -18,7 +18,7 @@ env/
 data/
 auth/
 tmp/
-*.db
+#*.db
 
 .env
 .env.local
