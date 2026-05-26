@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "igscrape"
+version = "0.1.0"
+description = "Instagram scraping library with account management, modeled after dt-facebook-scraper and using the scraping logic from instagram-scraper."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "playwright>=1.40.0",
+    "camoufox>=0.4.0",
+    "aiosqlite>=0.19.0",
+    "aiohttp>=3.9.0",
+    "click>=8.0.0",
+    "tabulate>=0.9.0",
+    "loguru>=0.7.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=4.9.0",
+    "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[project.scripts]
+igscrape = "igscrape.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["igscrape*"]
