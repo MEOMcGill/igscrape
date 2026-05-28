@@ -9,7 +9,8 @@ import asyncio
 import random
 import re
 from datetime import datetime, timezone
-from typing import Optional
+from pathlib import Path
+from typing import Awaitable, Callable, Optional
 
 from camoufox.async_api import AsyncNewBrowser
 from playwright.async_api import (
@@ -20,14 +21,16 @@ from playwright.async_api import (
     Playwright,
     TimeoutError as PWTimeoutError,
     async_playwright,
+    expect,
 )
 
 from .account import Account
 from .accounts_pool import AccountsPool
+from .downloaders import download_videos_from_posts
 from .exceptions import FailedLoginError
 from .logger import logger
 from .models import Query, ScrapingResult
-from .parsers import get_post_timestamp
+from .parsers import get_post_timestamp, post_flattener
 from .response import InstagramResponseInterceptor
 from .utils import get_device_os, internet_good
 
@@ -128,12 +131,33 @@ class BrowserSession:
         # instagram-scraper waits 10s after initial goto (post_scraper.py:251)
         await asyncio.sleep(10)
 
+        await self._handle_continue_reauth()
+
         if await self._need_to_log_in():
             ok = await self.login()
             if not ok:
                 raise FailedLoginError(f"Login failed for {self.account.username}")
 
         logger.info(f"Browser session ready for {self.account.username}")
+
+    async def _handle_continue_reauth(self):
+        """Click through the 'Continue' reauth screen (passkey / saved-session
+        one-click login). Instagram renders it as <div role="button"> wrapping
+        an inner element with aria-label="Continue" (post_scraper.py:283-301)."""
+        try:
+            continue_button = self.page.locator(
+                '[role="button"]:has([aria-label="Continue"])'
+            )
+            if (
+                await continue_button.count() > 0
+                and await continue_button.first.is_visible()
+            ):
+                logger.info("'Continue' reauth screen detected — clicking")
+                await continue_button.first.click()
+                await asyncio.sleep(10)
+                await self._save_cookies()
+        except Exception as e:
+            logger.debug(f"Continue reauth handling skipped: {e}")
 
     async def close(self):
         if self.response_interceptor:
@@ -157,26 +181,66 @@ class BrowserSession:
 
     # ==================== Auth ====================
 
+    async def _find_username_field(self) -> Locator | None:
+        """Find the username input, checking aria-labels then name attribute
+        (post_scraper.py:833-842)."""
+        for label in (
+            "Phone number, username, or email",
+            "Mobile number, username, or email",
+        ):
+            field = self.page.get_by_label(label)
+            if await field.count() > 0:
+                return field
+        field = self.page.locator('input[name="email"]')
+        if await field.count() > 0:
+            return field
+        return None
+
+    async def _find_password_field(self) -> Locator | None:
+        """Find the password input, checking name attribute first to avoid
+        strict-mode collisions with dialogs that get_by_label('Password') also
+        matches (post_scraper.py:844-857)."""
+        field = self.page.locator('input[name="pass"]')
+        if await field.count() > 0:
+            return field
+        field = self.page.locator('input[type="password"]')
+        if await field.count() > 0:
+            return field
+        field = self.page.get_by_role("textbox", name="Password")
+        if await field.count() > 0:
+            return field
+        return None
+
     async def _need_to_log_in(self) -> bool:
-        """Same detection as instagram-scraper (post_scraper.py:227-244)."""
-        try:
-            username_visible = await self.page.get_by_label(
-                "Phone number, username, or email"
-            ).is_visible()
-            password_visible = await self.page.get_by_label("Password").is_visible()
-            button_visible = await self.page.get_by_role(
-                "button", name="Log in", exact=True
-            ).is_visible()
-            if username_visible and password_visible and button_visible:
-                logger.info("Login layout visible, need to log in")
-                return True
-        except Exception:
-            pass
+        """Detect whether a login is required (post_scraper.py:239-261).
+
+        The password-only reauth screen (after clicking 'Continue') has no
+        username field, so we only require the password field to be present;
+        we also treat the logged-out landing page as needing login.
+        """
+        password_field = await self._find_password_field()
+        if password_field is not None:
+            try:
+                if await password_field.is_visible():
+                    logger.info("Login/reauth password field visible — need to log in")
+                    return True
+            except Exception:
+                pass
+
+        for label in ("Log in", "Log In"):
+            button = self.page.get_by_label(label)
+            try:
+                if await button.count() > 0 and await button.first.is_visible():
+                    logger.info("Logged-out landing page detected — need to log in")
+                    return True
+            except Exception:
+                pass
         return False
 
     async def login(self) -> bool:
-        """Replicates InstagramSession.log_in_to_instagram (post_scraper.py:848-861),
-        with @sleep_before(10)/@sleep_after(10) timings preserved.
+        """Replicates InstagramSession.log_in_to_instagram + the post-login
+        popup/Home handling (post_scraper.py:264-328, 999-1021), with the
+        @sleep_before(10)/@sleep_after(10) timings preserved.
         """
         logger.info(f"Logging in as {self.account.username}")
         await asyncio.sleep(10)
@@ -185,20 +249,26 @@ class BrowserSession:
                 await self.page.get_by_role("button", name="Log in").click()
                 await asyncio.sleep(5)
 
-            await self.page.get_by_label("Phone number, username, or email").fill(
-                self.account.username
-            )
-            await asyncio.sleep(1)
-            await self.page.get_by_label("Password").fill(self.account.password)
+            # Username field may be absent on the password-only reauth screen.
+            username_field = await self._find_username_field()
+            if username_field is not None and await username_field.is_visible():
+                await username_field.fill(self.account.username)
+                await asyncio.sleep(1)
+
+            password_field = await self._find_password_field()
+            if password_field is None:
+                raise FailedLoginError("could not find password field on login page")
+            await password_field.fill(self.account.password)
             await asyncio.sleep(1)
 
-            if self.mobile:
-                await self.page.get_by_role("button", name="Log in").click()
+            login_button = self.page.get_by_role("button", name="Log in")
+            if await login_button.count() > 0:
+                await login_button.nth(0).click()
             else:
-                await self.page.get_by_role("button", name="Log in").nth(0).click()
+                await self.page.locator('input[type="submit"]').click()
 
             await asyncio.sleep(10)
-            await self._clear_popup_after_login()
+            await self._dismiss_popups_and_wait_for_home()
 
             # Persist cookies and mark account active
             await self._save_cookies()
@@ -212,17 +282,33 @@ class BrowserSession:
             )
             return False
 
-    async def _clear_popup_after_login(self):
-        """Dismiss the 'Save login info?' / 'Not Now' popup
-        (post_scraper.py:697-707)."""
-        label = "Not now" if self.mobile else "Not Now"
-        try:
-            await self.page.get_by_role("button", name=label).nth(0).click(
-                timeout=5000
-            )
-            logger.info("Dismissed post-login popup")
-        except Exception:
-            logger.debug("No post-login popup to dismiss")
+    async def _dismiss_popups_and_wait_for_home(self):
+        """Dismiss post-login popups ('Save login info?', notifications) that
+        may appear sequentially, then wait for the Home control. The 120s
+        timeout leaves room for manual 2FA / challenge screens
+        (post_scraper.py:307-327)."""
+        home = self.page.get_by_label("Home").or_(
+            self.page.get_by_role("img", name="Home")
+        )
+        for _ in range(6):
+            try:
+                if await home.count() > 0 and await home.first.is_visible():
+                    break
+            except Exception:
+                pass
+            not_now = self.page.get_by_role("button", name="Not Now")
+            try:
+                if await not_now.count() > 0 and await not_now.first.is_visible():
+                    logger.info("post-login popup detected — clicking 'Not Now'")
+                    await not_now.first.click()
+                    await asyncio.sleep(5)
+                    continue
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+
+        await expect(home).to_be_visible(timeout=120000)
+        logger.info("home page detected")
 
     async def _save_cookies(self):
         storage = await self._context.storage_state()
@@ -280,15 +366,38 @@ class BrowserSession:
         handle: str,
         start_date: str,
         end_date: str,
+        on_new_posts: Callable[[list[dict]], None | Awaitable[None]] | None = None,
+        download_videos: bool = False,
+        video_dir: str | Path | None = None,
     ) -> ScrapingResult:
         """Scroll a user's profile, collect XHR-intercepted posts, stop at start_date
         or when the same post has been the lowest visible post too many times.
 
         Ports InstaPostScraper.scraper_user_home_page (post_scraper.py:472-661).
         Result codes mirror instagram-scraper's taxonomy exactly.
+
+        Streaming options (fired with each batch of newly-intercepted raw post
+        nodes as they arrive during scrolling):
+          - on_new_posts: a sync or async callback; overrides the built-in hook.
+          - download_videos + video_dir: download every mp4 to video_dir as
+            posts stream in (the built-in hook; ignored when on_new_posts set).
         """
         self.endpoint = "UserTimeline"
         self.response_interceptor.flush()
+
+        effective_cb = on_new_posts
+        if effective_cb is None and download_videos:
+            if video_dir is None:
+                raise ValueError("download_videos=True requires video_dir")
+
+            async def _builtin_video_download(batch: list[dict]):
+                # Flatten internally — extractors read top-level media fields
+                # that live under node['media'] for XDTFeedItem nodes.
+                await download_videos_from_posts(post_flattener(batch), video_dir)
+
+            effective_cb = _builtin_video_download
+
+        self.response_interceptor.on_new_posts = effective_cb
 
         start_time = datetime.now(timezone.utc)
         query = Query(
