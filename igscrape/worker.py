@@ -82,6 +82,11 @@ class Worker:
         self.current_account: Optional[Account] = None
         self.handles_scraped: int = 0
         self._initialized = False
+        # Persistent browser session, reused across tasks for the lifetime of
+        # the current account. Recreated on rotation / crash / logout. Callers
+        # who want a fresh browser per handle should instead recreate the
+        # InstagramScraper per handle (one worker => one session here).
+        self.session: Optional[BrowserSession] = None
 
     @classmethod
     async def create(
@@ -124,11 +129,33 @@ class Worker:
         return True
 
     async def close(self):
+        await self._close_session()
         if self.current_account:
             await self.pool.release_account(self.current_account.username)
             self.current_account = None
         self.handles_scraped = 0
         self._initialized = False
+
+    async def _ensure_session(self) -> BrowserSession:
+        """Lazily create + initialize the persistent session for the current
+        account, reusing it across tasks."""
+        if self.session is None:
+            self.session = BrowserSession(
+                account=self.current_account,
+                pool=self.pool,
+                headless=self.headless,
+                mobile=self.mobile,
+            )
+            await self.session.initialize()
+        return self.session
+
+    async def _close_session(self):
+        if self.session is not None:
+            try:
+                await self.session.close()
+            except Exception:
+                pass
+            self.session = None
 
     async def execute_task(self, task: Query) -> ScrapingResult:
         """Run one task. Applies the IG result-code taxonomy to decide what
@@ -145,14 +172,11 @@ class Worker:
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                async with BrowserSession(
-                    account=self.current_account,
-                    pool=self.pool,
-                    headless=self.headless,
-                    mobile=self.mobile,
-                ) as session:
-                    method = self._get_scraping_method(session, task.endpoint)
-                    result: ScrapingResult = await method(**task.query)
+                session = await self._ensure_session()
+                method = self._get_scraping_method(session, task.endpoint)
+                result: ScrapingResult = await method(
+                    **task.query, **(task.runtime_options or {})
+                )
 
                 # Successful single-shot or timeline scrape
                 if result.result in SUCCESS_CASES:
@@ -203,8 +227,10 @@ class Worker:
                         )
                         await self.rotate_account()
                         continue
-                    # target crashed / anything else — return the result so the
-                    # caller sees the failure, don't keep retrying.
+                    # target crashed / anything else — the tab is dead, so drop
+                    # the session (recreated on the next task) and return the
+                    # result so the caller sees the failure.
+                    await self._close_session()
                     return result
 
                 # Unknown result code — return as-is
@@ -249,7 +275,15 @@ class Worker:
         )
 
     async def rotate_account(self):
-        """Release current account with a 5-minute cooldown, then acquire a new one."""
+        """Release current account with a 5-minute cooldown, then acquire the
+        next available one.
+
+        With a single-account pool there is nothing else to switch to, so we
+        wait for the cooldown to expire and re-acquire the same account — this
+        gives the periodic-rest behavior the production scraper relied on
+        (rest 5 min every HANDLES_PER_REST handles) instead of crashing.
+        """
+        await self._close_session()
         if self.current_account:
             await self.pool.lock_until(
                 self.current_account.username,
@@ -265,10 +299,14 @@ class Worker:
         self.handles_scraped = 0
         self._initialized = False
 
-        if not await self.initialize():
+        account = await self.pool.get_available_or_wait()
+        if not account:
             raise NoAccountError(
                 f"Worker {self.id}: no account available for rotation"
             )
+        self.current_account = account
+        self._initialized = True
+        logger.info(f"Worker {self.id} acquired account {account.username}")
 
     def _get_scraping_method(
         self, session: BrowserSession, endpoint: str

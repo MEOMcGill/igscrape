@@ -33,6 +33,9 @@ class Query:
     params: dict
     start_date: datetime | None = None
     end_date: datetime | None = None
+    # Non-serializable per-call options (e.g. streaming callbacks). Excluded
+    # from to_dict/to_json and from equality so the Query stays JSON-safe.
+    runtime_options: dict | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self):
         self._validate_endpoint()
