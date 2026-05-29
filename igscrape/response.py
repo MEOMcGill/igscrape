@@ -5,8 +5,10 @@ InstagramSession.intercept_response (post_scraper.py:761-840) into an
 async Playwright interceptor.
 """
 
+import inspect
 import json
 import traceback
+from typing import Awaitable, Callable
 
 from playwright.async_api import Page, Response
 
@@ -27,6 +29,10 @@ class InstagramResponseInterceptor:
         self.user_metadata_list: list[dict] = []
         self.graphql_request_count: int = 0
         self.page: Page | None = None
+        # Optional streaming hook fired with each batch of newly-intercepted
+        # posts (raw XHR nodes, not flattened) as they arrive during a scrape.
+        # May be sync or async.
+        self.on_new_posts: Callable[[list[dict]], None | Awaitable[None]] | None = None
 
     def setup_interception(self, page: Page):
         self.page = page
@@ -45,6 +51,9 @@ class InstagramResponseInterceptor:
         self.post_metadata_list = []
         self.user_metadata_list = []
         self.graphql_request_count = 0
+        # The streaming hook is per-scrape config; clear it so a reused session
+        # never fires a previous task's callback on a later scrape.
+        self.on_new_posts = None
 
     def has_graphql_activity(self) -> bool:
         return self.graphql_request_count > 0
@@ -79,11 +88,22 @@ class InstagramResponseInterceptor:
         if not isinstance(data, dict):
             return
 
+        before = len(self.post_metadata_list)
         try:
             self._dispatch(data)
         except Exception as e:
             logger.warning(f"Error handling intercepted response: {e}")
             logger.debug(traceback.format_exc())
+
+        new_posts = self.post_metadata_list[before:]
+        if new_posts and self.on_new_posts is not None:
+            try:
+                res = self.on_new_posts(new_posts)
+                if inspect.isawaitable(res):
+                    await res
+            except Exception as e:
+                logger.warning(f"on_new_posts hook raised: {e}")
+                logger.debug(traceback.format_exc())
 
     def _dispatch(self, data: dict):
         """Route a response payload's `data` dict to the right accumulator.

@@ -12,6 +12,8 @@ Usage:
 """
 
 import asyncio
+from pathlib import Path
+from typing import Awaitable, Callable
 
 from .accounts_pool import AccountsPool
 from .logger import logger
@@ -53,8 +55,22 @@ class InstagramScraper:
         return await future
 
     async def user_timeline(
-        self, handle: str, start_date: str, end_date: str
+        self,
+        handle: str,
+        start_date: str,
+        end_date: str,
+        on_new_posts: Callable[[list[dict]], None | Awaitable[None]] | None = None,
+        download_videos: bool = False,
+        video_dir: str | Path | None = None,
     ) -> ScrapingResult:
+        """Scrape a user's timeline.
+
+        By default just returns a ScrapingResult. Optionally, while scrolling:
+          - on_new_posts(batch): called with each batch of newly-intercepted
+            raw post nodes (not flattened). Overrides the built-in hook.
+          - download_videos=True + video_dir: download every mp4 to video_dir
+            as posts arrive (ignored if on_new_posts is given).
+        """
         return await self._submit(
             Query(
                 endpoint="UserTimeline",
@@ -64,6 +80,11 @@ class InstagramScraper:
                     "end_date": end_date,
                 },
                 params={},
+                runtime_options={
+                    "on_new_posts": on_new_posts,
+                    "download_videos": download_videos,
+                    "video_dir": video_dir,
+                },
             )
         )
 
