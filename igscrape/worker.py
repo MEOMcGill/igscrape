@@ -63,6 +63,7 @@ class Worker:
         "UserProfile": "user_profile",
         "PostByShortcode": "post_by_shortcode",
         "Chaining": "chaining",
+        "Search": "search",
     }
 
     def __init__(
@@ -196,6 +197,11 @@ class Worker:
                                 post_flattener(result.posts), start, end
                             ),
                         )
+                    # Search results aren't from one author, so only flatten —
+                    # no authorship filter. Posts are already XDTMediaDict, so
+                    # post_flattener passes them through unchanged.
+                    elif task.endpoint == "Search":
+                        result.posts = post_flattener(result.posts)
                     self.handles_scraped += 1
                     return result
 

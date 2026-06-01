@@ -107,6 +107,35 @@ class InstagramScraper:
             Query(endpoint="Chaining", query={"handle": handle}, params={})
         )
 
+    async def search(
+        self,
+        keyword: str,
+        max_posts: int = 200,
+        on_new_posts: Callable[[list[dict]], None | Awaitable[None]] | None = None,
+        download_videos: bool = False,
+        video_dir: str | Path | None = None,
+    ) -> ScrapingResult:
+        """Collect posts from Instagram's keyword search (the SERP at
+        /explore/search/keyword/?q=<keyword>).
+
+        Scrolls until `max_posts` posts are collected or the results stop
+        yielding anything new. Search results are not reliably chronological, so
+        there is no date cutoff. Streaming options (on_new_posts / download_videos
+        + video_dir) behave exactly as in user_timeline.
+        """
+        return await self._submit(
+            Query(
+                endpoint="Search",
+                query={"keyword": keyword, "max_posts": max_posts},
+                params={},
+                runtime_options={
+                    "on_new_posts": on_new_posts,
+                    "download_videos": download_videos,
+                    "video_dir": video_dir,
+                },
+            )
+        )
+
     async def close(self):
         if self.worker_pool:
             await self.worker_pool.close()
