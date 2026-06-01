@@ -36,6 +36,7 @@ Other endpoints:
 await scraper.user_profile("natgeo")
 await scraper.post_by_shortcode("CwV9sKXOk-A")
 await scraper.chaining("natgeo")
+await scraper.search("coffee", max_posts=100)   # keyword-search SERP posts
 ```
 
 ## Accounts
@@ -73,6 +74,7 @@ Scraping:
   igscrape scrape user-profile <handle>...
   igscrape scrape post <shortcode>...
   igscrape scrape chaining <handle>...
+  igscrape scrape search <keyword>... [--max-posts N]
 
 Asset downloading:
   igscrape download-images <scraped.json> --out-dir ./images [--include-profile-pics] [--concurrency N]
@@ -81,6 +83,16 @@ Asset downloading:
 Export:
   igscrape export-posts <scraped.json> -o posts.csv       # or .parquet
 ```
+
+### Keyword search
+
+`scrape search` / `scraper.search(keyword, max_posts=...)` collects posts from
+Instagram's search SERP (`/explore/search/keyword/?q=<keyword>`). It scrolls
+until `max_posts` posts are gathered or the results stop yielding anything new
+(there is no date cutoff — search results aren't reliably chronological).
+Results are deduplicated by `pk` across the overlapping scroll responses, and
+the posts come back as standard media records, so `export-posts`,
+`download-images`, and `download-videos` all work on the output unchanged.
 
 ### Video downloads
 
