@@ -11,6 +11,7 @@ Commands:
 import asyncio
 import json
 import os
+import re
 
 import click
 from tabulate import tabulate
@@ -521,10 +522,16 @@ def _run_scrape_common(
                     calls.append(scraper.post_by_shortcode(shortcode=h))
                 elif endpoint == "Chaining":
                     calls.append(scraper.chaining(handle=h))
+                elif endpoint == "Search":
+                    calls.append(
+                        scraper.search(keyword=h, max_posts=extra_query["max_posts"])
+                    )
 
             async for result in gather(calls):
-                target = result.query.query.get("handle") or result.query.query.get(
-                    "shortcode"
+                target = (
+                    result.query.query.get("handle")
+                    or result.query.query.get("shortcode")
+                    or result.query.query.get("keyword")
                 )
                 click.echo(
                     f"{target}: {result.result} "
@@ -533,10 +540,11 @@ def _run_scrape_common(
                 )
                 suffix = (
                     f"_{extra_query['start_date']}_{extra_query['end_date']}"
-                    if extra_query
+                    if extra_query and "start_date" in extra_query
                     else ""
                 )
-                fname = f"{target.replace('.', '_')}_{endpoint}{suffix}.json"
+                safe_target = re.sub(r"[^A-Za-z0-9]+", "_", target).strip("_")
+                fname = f"{safe_target}_{endpoint}{suffix}.json"
                 result.save(os.path.join(output_dir, fname))
 
         click.echo(f"\nResults saved to: {output_dir}")
@@ -634,6 +642,30 @@ def scrape_chaining(ctx, handles, output_dir, max_sessions, headless, mobile, lo
         headless,
         mobile,
         log_level,
+    )
+
+
+@scrape.command("search")
+@click.argument("keywords", nargs=-1, required=True)
+@click.option("--max-posts", default=200, type=int, help="Stop after collecting this many posts")
+@click.option("--output-dir", default=None)
+@click.option("--max-sessions", default=2, type=int)
+@click.option("--headless", is_flag=True)
+@click.option("--mobile", is_flag=True)
+@click.option("--log-level", default="INFO")
+@click.pass_context
+def scrape_search(ctx, keywords, max_posts, output_dir, max_sessions, headless, mobile, log_level):
+    """Collect posts from Instagram keyword search (one query per KEYWORD)."""
+    _run_scrape_common(
+        ctx,
+        "Search",
+        keywords,
+        output_dir,
+        max_sessions,
+        headless,
+        mobile,
+        log_level,
+        extra_query={"max_posts": max_posts},
     )
 
 

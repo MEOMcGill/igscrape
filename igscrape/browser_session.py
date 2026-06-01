@@ -11,6 +11,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
+from urllib.parse import quote
 
 from camoufox.async_api import AsyncNewBrowser
 from playwright.async_api import (
@@ -142,22 +143,30 @@ class BrowserSession:
 
     async def _handle_continue_reauth(self):
         """Click through the 'Continue' reauth screen (passkey / saved-session
-        one-click login). Instagram renders it as <div role="button"> wrapping
-        an inner element with aria-label="Continue" (post_scraper.py:283-301)."""
-        try:
-            continue_button = self.page.locator(
-                '[role="button"]:has([aria-label="Continue"])'
-            )
-            if (
-                await continue_button.count() > 0
-                and await continue_button.first.is_visible()
-            ):
-                logger.info("'Continue' reauth screen detected — clicking")
-                await continue_button.first.click()
-                await asyncio.sleep(10)
-                await self._save_cookies()
-        except Exception as e:
-            logger.debug(f"Continue reauth handling skipped: {e}")
+        one-click login). Instagram renders this two ways:
+          - the passkey variant: <div role="button"> wrapping an inner element
+            with aria-label="Continue" (post_scraper.py:283-301), and
+          - the 'Continue as <user>' saved-session screen on /accounts/login/,
+            whose button has no aria-label and is matched by its accessible
+            name instead.
+        We try each candidate locator in turn and click the first visible one."""
+        candidates = (
+            self.page.locator('[role="button"]:has([aria-label="Continue"])'),
+            self.page.get_by_role("button", name="Continue"),
+        )
+        for continue_button in candidates:
+            try:
+                if (
+                    await continue_button.count() > 0
+                    and await continue_button.first.is_visible()
+                ):
+                    logger.info("'Continue' reauth screen detected — clicking")
+                    await continue_button.first.click()
+                    await asyncio.sleep(10)
+                    await self._save_cookies()
+                    return
+            except Exception as e:
+                logger.debug(f"Continue reauth candidate skipped: {e}")
 
     async def close(self):
         if self.response_interceptor:
@@ -287,8 +296,12 @@ class BrowserSession:
         may appear sequentially, then wait for the Home control. The 120s
         timeout leaves room for manual 2FA / challenge screens
         (post_scraper.py:307-327)."""
-        home = self.page.get_by_label("Home").or_(
-            self.page.get_by_role("img", name="Home")
+        # exact=True so post images whose alt text merely contains "home"
+        # (e.g. "#coffeeathome") don't match — otherwise a login that redirects
+        # to a content page rather than the feed (e.g. reauth from a gated
+        # ?next=... URL) makes this locator resolve to many elements.
+        home = self.page.get_by_label("Home", exact=True).or_(
+            self.page.get_by_role("img", name="Home", exact=True)
         )
         for _ in range(6):
             try:
@@ -307,7 +320,7 @@ class BrowserSession:
                 pass
             await asyncio.sleep(5)
 
-        await expect(home).to_be_visible(timeout=120000)
+        await expect(home.first).to_be_visible(timeout=120000)
         logger.info("home page detected")
 
     async def _save_cookies(self):
@@ -349,12 +362,16 @@ class BrowserSession:
 
     async def _failed_to_load_gate(self, handle: str) -> bool:
         """The 'Failed to Load / Retry' popup (post_scraper.py:173-187)."""
+        return await self._failed_to_load_gate_url(f"{BASE_URL}{handle}/")
+
+    async def _failed_to_load_gate_url(self, url: str) -> bool:
+        """As _failed_to_load_gate, but gated on an arbitrary target URL."""
         try:
             if await self.page.get_by_role("button", name="Retry").count() > 0:
                 if await self.page.get_by_text("Failed to Load").count() > 0:
                     # Only treat as gate if we're actually on the target page —
                     # retry popups from previous pages can linger.
-                    return self.page.url == f"{BASE_URL}{handle}/"
+                    return self.page.url == url
         except Exception:
             pass
         return False
@@ -709,4 +726,181 @@ class BrowserSession:
         # Still return success if the profile at least loaded — chaining
         # XHR does not always fire.
         return _result("success" if self.response_interceptor.user_metadata_list else "timeout error")
+
+    # ==================== Scraping: search ====================
+
+    async def _reauth_if_bounced(self, target_url: str) -> bool:
+        """Gated pages (the search SERP) bounce a soft-logged-in session to the
+        '/accounts/login/' Continue wall. The reauth chain only runs on the
+        BASE_URL landing in initialize(), so re-run it here and re-navigate.
+
+        Returns True if we end up back on `target_url`, False otherwise."""
+        if "accounts/login" not in self.page.url:
+            return self.page.url == target_url
+        logger.info(f"bounced to login wall ({self.page.url}); reauthenticating")
+        await self._handle_continue_reauth()
+        await asyncio.sleep(5)
+        if await self._need_to_log_in():
+            ok = await self.login()
+            if not ok:
+                raise FailedLoginError(f"reauth failed for {self.account.username}")
+        await self._goto(target_url)
+        await asyncio.sleep(5)
+        return self.page.url == target_url
+
+    async def search(
+        self,
+        keyword: str,
+        max_posts: int = 200,
+        on_new_posts: Callable[[list[dict]], None | Awaitable[None]] | None = None,
+        download_videos: bool = False,
+        video_dir: str | Path | None = None,
+    ) -> ScrapingResult:
+        """Scroll the keyword-search SERP, collecting XHR-intercepted posts.
+
+        Mirrors user_timeline's scroll/repetition machinery but stops on a
+        `max_posts` cap (search results aren't reliably chronological, so there
+        is no date cutoff). The repeated-lowest-post counter is the only other
+        stop condition — the safety net against endless scrolling.
+
+        Streaming options (on_new_posts / download_videos + video_dir) behave
+        exactly as in user_timeline.
+        """
+        self.endpoint = "Search"
+        self.response_interceptor.flush()
+
+        effective_cb = on_new_posts
+        if effective_cb is None and download_videos:
+            if video_dir is None:
+                raise ValueError("download_videos=True requires video_dir")
+
+            async def _builtin_video_download(batch: list[dict]):
+                await download_videos_from_posts(post_flattener(batch), video_dir)
+
+            effective_cb = _builtin_video_download
+
+        self.response_interceptor.on_new_posts = effective_cb
+
+        start_time = datetime.now(timezone.utc)
+        query = Query(
+            endpoint="Search",
+            query={"keyword": keyword, "max_posts": max_posts},
+            params={},
+        )
+
+        def _result(code: str) -> ScrapingResult:
+            return ScrapingResult(
+                query=query,
+                result=code,
+                posts=list(self.response_interceptor.post_metadata_list),
+                users=list(self.response_interceptor.user_metadata_list),
+                time_started=start_time,
+                time_taken=datetime.now(timezone.utc) - start_time,
+            )
+
+        target_url = f"{BASE_URL}explore/search/keyword/?q={quote(keyword)}"
+        await self._goto(target_url)
+        await asyncio.sleep(5)
+        if not await self._reauth_if_bounced(target_url):
+            return _result("logged out while scraping")
+
+        prev_post_url: str | None = None
+        repeated_post_count = 0
+        num_retries_lowest_post = 0
+
+        while True:
+            if await self._failed_to_load_gate_url(target_url):
+                return _result("failed to load")
+
+            try:
+                if self.page.url != target_url and "accounts/login" not in self.page.url:
+                    await self._goto(target_url)
+                    await asyncio.sleep(5)
+                if not await self._reauth_if_bounced(target_url):
+                    return _result("logged out while scraping")
+
+                # Post-count cap (primary stop condition)
+                if len(self.response_interceptor.post_metadata_list) >= max_posts:
+                    return _result("success")
+
+                # Inner scroll loop: find the lowest post (with retries)
+                while True:
+                    if await self.page.get_by_role("button", name="Retry").count() > 0:
+                        if await self.page.get_by_text("Failed to Load").count() > 0:
+                            return _result("failed to load")
+                    if (
+                        await self.page.get_by_role(
+                            "button", name="Reload page"
+                        ).count()
+                        > 0
+                        and await self.page.get_by_text("Something went wrong").count()
+                        > 0
+                    ):
+                        return _result("something went wrong - reload")
+
+                    try:
+                        lowest_post = await self._find_lowest_post()
+                        num_retries_lowest_post = 0
+                        break
+                    except Exception as e:
+                        msg = str(e)
+                        logger.warning(f"find_lowest_post error: {msg}")
+                        if msg == "Target crashed":
+                            return _result("target crashed")
+                        num_retries_lowest_post += 1
+                        if num_retries_lowest_post > 5:
+                            raise
+                        await asyncio.sleep(5)
+
+                if lowest_post is None:
+                    # No post anchors yet: keep scrolling a few times, then give
+                    # up. If we already have posts, treat it as the end.
+                    if self.response_interceptor.post_metadata_list:
+                        return _result("success")
+                    await self.page.mouse.wheel(0, 4000)
+                    await asyncio.sleep(2)
+                    repeated_post_count += 1
+                    if repeated_post_count > 10:
+                        return _result("no posts")
+                    continue
+
+                try:
+                    lowest_post_url = await lowest_post.get_attribute("href")
+                except Exception as e:
+                    logger.error(f"Failed to read lowest post href: {e}")
+                    raise
+
+                try:
+                    await lowest_post.scroll_into_view_if_needed()
+                except Exception as e:
+                    logger.warning(f"scroll_into_view failed: {e}")
+                await self.pool.update_scroll_count(
+                    self.account.username, self.endpoint, 1
+                )
+
+                logger.info(
+                    f"search '{keyword}': posts="
+                    f"{len(self.response_interceptor.post_metadata_list)}/{max_posts}, "
+                    f"repeated={repeated_post_count}"
+                )
+
+                # Repetition detection — the SERP stopped yielding new posts.
+                if lowest_post_url == prev_post_url:
+                    repeated_post_count += 1
+                    if repeated_post_count > 20:
+                        return _result("scraped until first ever post was reached")
+                else:
+                    repeated_post_count = 0
+
+                prev_post_url = lowest_post_url
+                await asyncio.sleep(1)
+
+            except PWTimeoutError:
+                return _result("timeout error")
+            except Exception as e:
+                msg = str(e)
+                logger.error(f"Unexpected error searching '{keyword}': {e}")
+                if msg == "Target crashed":
+                    return _result("target crashed")
+                raise
 

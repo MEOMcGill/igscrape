@@ -26,6 +26,7 @@ class Query:
         "UserProfile": ["handle"],
         "PostByShortcode": ["shortcode"],
         "Chaining": ["handle"],
+        "Search": ["keyword"],
     }
 
     endpoint: str

@@ -123,6 +123,8 @@ class InstagramResponseInterceptor:
             shortcode_data = data["xdt_api__v1__media__shortcode__web_info"]
             for item in shortcode_data.get("items") or []:
                 self.post_metadata_list.append(item)
+        elif "xdt_fbsearch__top_serp_graphql" in keys:
+            self._parse_search(data["xdt_fbsearch__top_serp_graphql"] or {})
         elif "xdt_api__v1__discover__chaining" in keys:
             chaining = data["xdt_api__v1__discover__chaining"] or {}
             self.user_metadata_list += chaining.get("users") or []
@@ -132,6 +134,27 @@ class InstagramResponseInterceptor:
             return
         else:
             logger.debug(f"Ignoring unhandled data keys: {list(keys)}")
+
+    def _parse_search(self, serp: dict):
+        """Keyword-search SERP (xdt_fbsearch__top_serp_graphql).
+
+        Each `edges[].node` is one of several `XDTTopSerp*Unit` typenames; the
+        posts live in `XDTTopSerpMediaGridUnit.items`, each a full XDTMediaDict
+        (same shape as feed media). Other units (header, accounts) carry no
+        posts and are skipped. Successive scroll responses overlap, so we dedup
+        by `pk`/`id` — the search scrape's stop condition counts this list.
+        """
+        seen = {p.get("pk") or p.get("id") for p in self.post_metadata_list}
+        for edge in serp.get("edges") or []:
+            node = edge.get("node") or {}
+            if node.get("__typename") != "XDTTopSerpMediaGridUnit":
+                continue
+            for item in node.get("items") or []:
+                key = item.get("pk") or item.get("id")
+                if key in seen:
+                    continue
+                seen.add(key)
+                self.post_metadata_list.append(item)
 
     def _parse_feed(self, feed: dict):
         """From post_scraper.py:728-749."""
