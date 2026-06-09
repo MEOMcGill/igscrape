@@ -141,6 +141,17 @@ class InstagramScraper:
             await self.worker_pool.close()
             self.worker_pool = None
 
+    async def restart(self):
+        """Force-recreate the browser session(s) after a hang, mid-run.
+
+        Cancels any wedged worker and resets the pool (see
+        WorkerPool.force_restart); the next scraping call re-initializes a fresh
+        worker + browser. Use this instead of close() when a task has hung —
+        close() would block awaiting the stuck worker.
+        """
+        if self.worker_pool:
+            await self.worker_pool.force_restart()
+
     async def __aenter__(self):
         return self
 

@@ -114,6 +114,43 @@ class WorkerPool:
         self._initialized = False
         self._shutdown = False
 
+    async def force_restart(self):
+        """Tear down and reset the pool so the next task rebuilds it fresh.
+
+        Unlike close(), this CANCELS the worker loop tasks instead of awaiting
+        them: a worker can be wedged inside a hung browser op in
+        execute_task(), and close()'s `await asyncio.gather(worker_tasks)` would
+        then block forever. Every step here is time-bounded so a wedged browser
+        can't stall recovery, and each account is released up front so a hanging
+        browser-close can't strand it as in_use=1 (which would NoAccountError
+        the re-initialize). Leaves the pool uninitialized; the next
+        submit_task() builds new workers + a fresh BrowserSession.
+        """
+        self._shutdown = True
+        for task in self.worker_tasks:
+            task.cancel()
+        if self.worker_tasks:
+            # Bounded: returns after the timeout even if a task won't unwind.
+            await asyncio.wait(self.worker_tasks, timeout=30)
+        for worker in self.workers:
+            account = getattr(worker, "current_account", None)
+            if account is not None:
+                try:
+                    await asyncio.wait_for(
+                        self.pool.release_account(account.username), timeout=10
+                    )
+                except Exception:
+                    pass
+            try:
+                await asyncio.wait_for(worker.close(), timeout=30)
+            except Exception:
+                pass
+        self.workers = []
+        self.worker_tasks = []
+        self._initialized = False
+        self._shutdown = False
+        logger.info("WorkerPool force-restarted; will re-initialize on next task")
+
     async def __aenter__(self):
         return self
 
