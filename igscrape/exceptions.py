@@ -1,7 +1,7 @@
 """Custom exceptions for igscrape.
 
-These map loosely onto instagram-scraper's result-code taxonomy from
-consume_post_scraper.py (retry_cases / success_cases / crash_cases).
+These map loosely onto the result-code taxonomy
+(retry_cases / success_cases / crash_cases).
 """
 
 

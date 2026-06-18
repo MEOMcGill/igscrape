@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "igscrape"
 version = "0.1.0"
-description = "Instagram scraping library with account management, modeled after dt-facebook-scraper and using the scraping logic from instagram-scraper."
+description = "Instagram scraping library with account management."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

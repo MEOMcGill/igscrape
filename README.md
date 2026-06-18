@@ -2,7 +2,7 @@
 
 Standalone Instagram scraper.
 
-Architecture mirrors [`dt-facebook-scraper`](../dt-facebook-scraper/) (`fbscrape`): async Python API, SQLite-backed account pool, asyncio WorkerPool of Camoufox browser sessions, Click CLI for account management. The actual Instagram scraping primitives — login flow, XHR interception targets, scroll termination conditions, result-code taxonomy, account rotation — are ported from the production-tested [`instagram-scraper`](../instagram-scraper/) repo so behavior is identical to what already works in prod.
+An async Python API backed by a SQLite account pool, an asyncio `WorkerPool` of Camoufox browser sessions, and a Click CLI for account management. The Instagram scraping primitives — login flow, XHR interception targets, scroll termination conditions, result-code taxonomy, and account rotation — are designed to be resilient and production-tested.
 
 ## Install
 
@@ -96,7 +96,7 @@ the posts come back as standard media records, so `export-posts`,
 
 ### Video downloads
 
-By default `download-videos` writes two files per post: `{post_id}_video.mp4` and `{post_id}_audio.mp4`. Instagram serves video and audio as separate DASH streams; the parser picks the highest-bitrate video `Representation` + the single audio `Representation` per manifest (dropping the duplicate lower-bitrate video rep that `instagram-scraper` used to save too).
+By default `download-videos` writes two files per post: `{post_id}_video.mp4` and `{post_id}_audio.mp4`. Instagram serves video and audio as separate DASH streams; the parser picks the highest-bitrate video `Representation` + the single audio `Representation` per manifest (dropping the duplicate lower-bitrate video rep).
 
 With `--merge`, each pair is ffmpeg-muxed (stream-copied, no re-encode) into a single playable `{post_id}.mp4`, and the raw streams are deleted unless you pass `--keep-streams`. Silent reels (no audio track in the manifest) stay as `{post_id}_video.mp4`. Requires `ffmpeg` on `PATH` — `brew install ffmpeg`.
 
@@ -115,7 +115,7 @@ Default DB path: `~/db/accounts.db` relative to the repo root. Override with `ig
 
 ## Result codes
 
-From `igscrape.worker`, sourced verbatim from `instagram-scraper`:
+From `igscrape.worker`:
 
 | Code                                                          | Category |
 |---------------------------------------------------------------|----------|
@@ -128,7 +128,7 @@ From `igscrape.worker`, sourced verbatim from `instagram-scraper`:
 | `bad internet` / `timeout error` / `something went wrong - reload` / `failed to load` | retry |
 | `target crashed` / `logged out while scraping`                 | crash    |
 
-Retryable results trigger up to 3 attempts with account rotation (accounts that hit `failed to load` are locked for 15 minutes, per instagram-scraper's `RETRY_MINUTES`). After `HANDLES_PER_REST` (100) successful handles on one account, the worker rotates — same threshold instagram-scraper uses in `consume_post_scraper.py`.
+Retryable results trigger up to 3 attempts with account rotation (accounts that hit `failed to load` are locked for 15 minutes, set by `RETRY_MINUTES`). After `HANDLES_PER_REST` (100) successful handles on one account, the worker rotates.
 
 ## Project layout
 

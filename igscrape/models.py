@@ -75,7 +75,7 @@ class Query:
 class ScrapingResult:
     """Result of an Instagram scraping operation.
 
-    The `result` string comes from instagram-scraper's result-code taxonomy:
+    The `result` string comes from the result-code taxonomy:
         - 'scraped until user-specified starting date was reached'
         - 'scraped until first ever post was reached'
         - 'no posts'

@@ -13,7 +13,7 @@ class Account(JSONTrait):
 
     Instagram accepts username, email, or phone as login identifier — we use
     `username` as the primary key because it is always set and is what
-    instagram-scraper fills into the login form.
+    gets filled into the login form.
     """
 
     username: str

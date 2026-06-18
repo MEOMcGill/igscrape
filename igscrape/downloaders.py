@@ -1,7 +1,6 @@
 """Async image and video downloaders for scraped Instagram posts.
 
-Ported from instagram-scraper/instagram_scraper/insta_image_consumer.py and
-insta_video_consumer.py (the fetch/save logic, not the RabbitMQ/S3 plumbing).
+Handles the fetch/save logic for post images and videos.
 """
 
 import asyncio
@@ -35,7 +34,7 @@ HEADERS = {
 
 
 def _image_name(post_id: str, image_url: str) -> str:
-    """Same naming convention as instagram-scraper: <post_id>_<slug>.png."""
+    """Naming convention: <post_id>_<slug>.png."""
     tail = image_url[image_url.rfind("/") + 1 :]
     for ext in IMAGE_EXTENSIONS:
         if ext in tail:

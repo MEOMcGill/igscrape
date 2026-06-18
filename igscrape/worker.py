@@ -1,9 +1,7 @@
 """Worker: acquires an account, runs a scraping task, routes the result.
 
-Retry/rotate/crash behavior follows instagram-scraper's result-code taxonomy
-from consume_post_scraper.py:138-151 (retry_cases / success_cases / crash_cases),
-not fbscrape's exception-based rules — instagram-scraper is the production-tested
-implementation so we defer to its semantics.
+Retry/rotate/crash behavior follows the result-code taxonomy
+(retry_cases / success_cases / crash_cases).
 """
 
 import asyncio
@@ -27,7 +25,7 @@ from .parsers import (
     post_flattener,
 )
 
-# Ported verbatim from instagram-scraper/consume_post_scraper.py:138-151
+# Result-code taxonomy: retry / success / crash cases
 RETRY_CASES = {
     "bad internet",
     "timeout error",
@@ -47,8 +45,7 @@ CRASH_CASES = {
     "logged out while scraping",
 }
 
-# instagram-scraper's rotation policy: rest after 100 handles
-# (consume_post_scraper.py:123-124)
+# Rotation policy: rest after 100 handles
 HANDLES_PER_REST = 100
 REST_SECONDS = 300
 # consume_post_scraper.py:42
@@ -162,7 +159,7 @@ class Worker:
         """Run one task. Applies the IG result-code taxonomy to decide what
         to do on failure — retry (same or rotated account), rotate, or raise.
         """
-        # instagram-scraper's batch_size=100 rotation rule
+        # batch_size=100 rotation rule
         if self.handles_scraped >= self.handles_per_rest:
             logger.info(
                 f"Worker {self.id}: scraped {self.handles_scraped} handles, "
@@ -181,8 +178,7 @@ class Worker:
 
                 # Successful single-shot or timeline scrape
                 if result.result in SUCCESS_CASES:
-                    # Post-process UserTimeline like instagram-scraper does
-                    # (post_scraper.py:283-286)
+                    # Post-process UserTimeline results
                     if task.endpoint == "UserTimeline" and result.result not in (
                         "no posts",
                         "account is private",

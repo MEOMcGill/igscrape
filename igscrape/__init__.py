@@ -1,8 +1,9 @@
 """igscrape — standalone Instagram scraper.
 
-Architecture mirrors dt-facebook-scraper (fbscrape). Scraping logic (XHR
-interception targets, login flow, scroll termination conditions, result codes,
-account rotation) is ported from instagram-scraper, which is production-tested.
+An async API with a SQLite-backed account pool, an asyncio WorkerPool of
+Camoufox browser sessions, and a Click CLI for account management. Scraping
+logic covers XHR interception targets, login flow, scroll termination
+conditions, result codes, and account rotation.
 """
 
 from .accounts_pool import AccountsPool

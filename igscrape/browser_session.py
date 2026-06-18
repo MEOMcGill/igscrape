@@ -1,8 +1,7 @@
 """Camoufox-backed Playwright session with Instagram login + scrape methods.
 
-All scraping logic ported from instagram-scraper/instagram_scraper/post_scraper.py
-so behavior (selectors, timings, result codes, termination conditions) matches
-the production scraper exactly.
+Encapsulates the scraping behavior: selectors, timings, result codes, and
+termination conditions.
 """
 
 import asyncio
@@ -129,7 +128,7 @@ class BrowserSession:
 
         # Always land on instagram.com and decide whether to log in.
         await self.page.goto(BASE_URL, wait_until="domcontentloaded")
-        # instagram-scraper waits 10s after initial goto (post_scraper.py:251)
+        # Wait 10s after the initial goto to let the page settle
         await asyncio.sleep(10)
 
         await self._handle_continue_reauth()
@@ -390,8 +389,7 @@ class BrowserSession:
         """Scroll a user's profile, collect XHR-intercepted posts, stop at start_date
         or when the same post has been the lowest visible post too many times.
 
-        Ports InstaPostScraper.scraper_user_home_page (post_scraper.py:472-661).
-        Result codes mirror instagram-scraper's taxonomy exactly.
+        Scrapes a user's home page; result codes follow the result-code taxonomy.
 
         Streaming options (fired with each batch of newly-intercepted raw post
         nodes as they arrive during scrolling):

@@ -1,7 +1,6 @@
 """Instagram post/user parsing helpers.
 
-Ported from instagram-scraper/instagram_scraper/post_scraper.py so behavior
-matches the production scraper exactly.
+Parsing helpers for post and user payloads.
 """
 
 from datetime import datetime
@@ -35,8 +34,7 @@ def post_flattener(posts: list[dict]) -> list[dict]:
 def get_post_timestamp(post: dict) -> datetime | None:
     """Return the post's taken_at as a naive UTC datetime.
 
-    instagram-scraper tries caption.created_at first, then taken_at, then
-    media.taken_at. Follows post_scraper.py:457-470.
+    Tries caption.created_at first, then taken_at, then media.taken_at.
     """
     try:
         ts = post["caption"]["created_at"]

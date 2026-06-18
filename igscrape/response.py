@@ -1,8 +1,6 @@
 """Intercept Instagram XHR responses and accumulate posts/users.
 
-Ports the branching logic from instagram-scraper's
-InstagramSession.intercept_response (post_scraper.py:761-840) into an
-async Playwright interceptor.
+Implements the response-branching logic as an async Playwright interceptor.
 """
 
 import inspect
