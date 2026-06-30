@@ -1,6 +1,34 @@
 """Unit tests for the interceptor's replay-ingest + dedup path."""
 
+import asyncio
+import json
+from urllib.parse import urlencode
+
 from igscrape.response import InstagramResponseInterceptor
+
+
+class _FakeRequest:
+    """Minimal stand-in for a Playwright Request for _capture_request."""
+
+    def __init__(self, url, form: dict, headers: dict, method="POST"):
+        self.url = url
+        self.method = method
+        self.post_data = urlencode(form)
+        self._headers = headers
+
+    @property
+    def headers(self):
+        return self._headers
+
+    async def all_headers(self):
+        return self._headers
+
+
+_SEARCH_DATA = {"xdt_fbsearch__top_serp_graphql": {"edges": []}}
+
+
+def _capture(interceptor, request):
+    asyncio.run(interceptor._capture_request(request, _SEARCH_DATA))
 
 
 def _feed_data(edges):
@@ -70,6 +98,46 @@ def test_search_serp_dedup():
     assert {p["pk"] for p in new} == {"a", "b"}
     # Re-ingesting the same SERP yields nothing new.
     assert interceptor.ingest_payloads([serp]) == []
+
+
+def test_capture_prefers_pagination_template_over_initial():
+    interceptor = InstagramResponseInterceptor()
+    hdrs = {"x-fb-friendly-name": "PolarisKeywordSearchExplorePageRelayQuery"}
+
+    # 1) Initial-page request: variables carry no cursor.
+    initial = _FakeRequest(
+        "https://www.instagram.com/api/graphql",
+        {"doc_id": "111", "variables": json.dumps({"query": "x"})},
+        hdrs,
+    )
+    _capture(interceptor, initial)
+    assert interceptor.templates["search"]["doc_id"] == "111"
+    assert interceptor.templates["search"]["_has_cursor"] is False
+
+    # 2) Pagination request: carries `after` + a different doc_id. Wins.
+    paginating = _FakeRequest(
+        "https://www.instagram.com/api/graphql",
+        {"doc_id": "222", "variables": json.dumps({"after": "CUR", "first": 24, "query": "x"})},
+        {"x-fb-friendly-name": "PolarisKeywordSearchExplorePageRelayPaginationQuery"},
+    )
+    _capture(interceptor, paginating)
+    assert interceptor.templates["search"]["doc_id"] == "222"
+    assert interceptor.templates["search"]["_has_cursor"] is True
+
+    # 3) A later initial-page request must NOT clobber the paginating template.
+    _capture(interceptor, initial)
+    assert interceptor.templates["search"]["doc_id"] == "222"
+
+
+def test_capture_matches_url_without_trailing_slash():
+    interceptor = InstagramResponseInterceptor()
+    req = _FakeRequest(
+        "https://www.instagram.com/api/graphql",  # no trailing slash
+        {"doc_id": "1", "variables": json.dumps({"after": "C"})},
+        {},
+    )
+    _capture(interceptor, req)
+    assert "search" in interceptor.templates
 
 
 def test_flush_clears_posts_and_templates_but_keeps_tokens():

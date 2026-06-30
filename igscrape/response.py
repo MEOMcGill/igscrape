@@ -21,10 +21,12 @@ from playwright.async_api import Page, Request, Response
 
 from .logger import logger
 
+# Match without trailing slash: the live GraphQL endpoint is posted to as
+# `/api/graphql` (no trailing slash), so prefixes must not require one.
 API_DIRECTORIES = (
-    "https://www.instagram.com/api/graphql/",
+    "https://www.instagram.com/api/graphql",
     "https://www.instagram.com/api/v1",
-    "https://www.instagram.com/graphql/",
+    "https://www.instagram.com/graphql",
 )
 
 # Response `data` keys -> the friendly template name we replay under. The URL
@@ -200,6 +202,16 @@ class InstagramResponseInterceptor:
             except Exception:
                 variables = {}
 
+        # Instagram uses a SEPARATE query for pagination than for the first page
+        # (e.g. PolarisKeywordSearchExplorePageRelayQuery vs ...PaginationQuery):
+        # only the paginating one carries a cursor (`after` / `max_id`) and the
+        # doc_id we must replay. Prefer the cursor-bearing template; never let an
+        # initial-page request clobber a paginating one already captured.
+        has_cursor = bool(variables.get("after")) or bool(form.get("max_id"))
+        existing = self.templates.get(label)
+        if existing is not None and existing.get("_has_cursor") and not has_cursor:
+            return
+
         self.templates[label] = {
             "url": request.url,
             "method": request.method,
@@ -208,8 +220,12 @@ class InstagramResponseInterceptor:
             "variables": variables,
             "doc_id": form.get("doc_id"),
             "friendly_name": headers.get("x-fb-friendly-name"),
+            "_has_cursor": has_cursor,
         }
-        logger.debug(f"captured '{label}' template (doc_id={form.get('doc_id')})")
+        logger.debug(
+            f"captured '{label}' template (doc_id={form.get('doc_id')}, "
+            f"has_cursor={has_cursor})"
+        )
 
     def ingest_payloads(self, payloads: list[dict]) -> list[dict]:
         """Dispatch already-parsed replay `data` payloads into the accumulators

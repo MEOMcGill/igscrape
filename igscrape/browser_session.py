@@ -349,22 +349,26 @@ class BrowserSession:
     # ==================== Capture-replay primitives ====================
 
     async def _wait_for_template(
-        self, label: str, timeout: float = 30.0, bootstrap_scroll: bool = True
+        self, label: str, timeout: float = 30.0, require_cursor: bool = True
     ) -> dict | None:
-        """Provoke and wait for the natural request that yields `label`'s
-        template. A small scroll triggers the feed/search XHR that the response
-        interceptor captures (browser_session.py initialize()). Returns the
-        captured template, or None on timeout."""
+        """Scroll to provoke, and wait for, the request that yields `label`'s
+        replayable template.
+
+        Instagram paginates with a *different* query than the first page (the
+        paginating one carries the cursor + the doc_id we must replay), so by
+        default we keep scrolling until a cursor-bearing template is captured.
+        Falls back to whatever was captured (the initial-page template) if the
+        paginating request never fires before `timeout`."""
         elapsed = 0.0
         while elapsed < timeout:
             template = self.response_interceptor.templates.get(label)
-            if template is not None:
+            if template is not None and (template.get("_has_cursor") or not require_cursor):
                 return template
-            if bootstrap_scroll:
-                try:
-                    await self.page.mouse.wheel(0, 3000)
-                except Exception:
-                    pass
+            # Scroll to trigger the next-page (pagination) XHR.
+            try:
+                await self.page.mouse.wheel(0, 3000)
+            except Exception:
+                pass
             await asyncio.sleep(1.0)
             elapsed += 1.0
         return self.response_interceptor.templates.get(label)
