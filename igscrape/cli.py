@@ -647,7 +647,7 @@ def scrape_chaining(ctx, handles, output_dir, max_sessions, headless, mobile, lo
 
 @scrape.command("search")
 @click.argument("keywords", nargs=-1, required=True)
-@click.option("--max-posts", default=200, type=int, help="Stop after collecting this many posts")
+@click.option("--max-posts", default=-1, type=int, help="Stop after collecting this many posts (-1 = no limit)")
 @click.option("--output-dir", default=None)
 @click.option("--max-sessions", default=2, type=int)
 @click.option("--headless", is_flag=True)

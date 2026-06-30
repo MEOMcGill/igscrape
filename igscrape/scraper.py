@@ -110,7 +110,7 @@ class InstagramScraper:
     async def search(
         self,
         keyword: str,
-        max_posts: int = 200,
+        max_posts: int = -1,
         on_new_posts: Callable[[list[dict]], None | Awaitable[None]] | None = None,
         download_videos: bool = False,
         video_dir: str | Path | None = None,

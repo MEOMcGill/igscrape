@@ -749,7 +749,7 @@ class BrowserSession:
     async def search(
         self,
         keyword: str,
-        max_posts: int = 200,
+        max_posts: int = -1,
         on_new_posts: Callable[[list[dict]], None | Awaitable[None]] | None = None,
         download_videos: bool = False,
         video_dir: str | Path | None = None,
@@ -818,7 +818,7 @@ class BrowserSession:
                     return _result("logged out while scraping")
 
                 # Post-count cap (primary stop condition)
-                if len(self.response_interceptor.post_metadata_list) >= max_posts:
+                if (max_posts > 0) and (len(self.response_interceptor.post_metadata_list) >= max_posts):
                     return _result("success")
 
                 # Inner scroll loop: find the lowest post (with retries)
@@ -878,7 +878,7 @@ class BrowserSession:
 
                 logger.info(
                     f"search '{keyword}': posts="
-                    f"{len(self.response_interceptor.post_metadata_list)}/{max_posts}, "
+                    f"{len(self.response_interceptor.post_metadata_list)}/{max_posts if max_posts > 0 else '∞'}, "
                     f"repeated={repeated_post_count}"
                 )
 
