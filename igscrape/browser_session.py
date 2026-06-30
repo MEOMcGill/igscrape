@@ -28,6 +28,7 @@ from .account import Account
 from .accounts_pool import AccountsPool
 from .downloaders import download_videos_from_posts
 from .exceptions import FailedLoginError, RateLimitError
+from .jsonl_store import JsonlWriter
 from .logger import logger
 from .models import Query, ScrapingResult
 from .pagination import (
@@ -49,6 +50,25 @@ BASE_URL = "https://www.instagram.com/"
 # replays so the session still produces human-like page activity.
 REPLAY_TIMEOUT_MS = 30000
 FINGERPRINT_EVERY = 50
+
+
+def _combine_post_hooks(hooks: list) -> Callable | None:
+    """Fold several per-batch sinks (JSONL writer, video downloader, caller's
+    on_new_posts) into one callback fired for each batch of new posts. Returns
+    None if no sinks are enabled. Sync or async sinks both work."""
+    hooks = [h for h in hooks if h is not None]
+    if not hooks:
+        return None
+    if len(hooks) == 1:
+        return hooks[0]
+
+    async def _multi(batch: list[dict]):
+        for hook in hooks:
+            res = hook(batch)
+            if inspect.isawaitable(res):
+                await res
+
+    return _multi
 
 
 class BrowserSession:
@@ -346,6 +366,34 @@ class BrowserSession:
         logger.debug(f"goto({url})")
         await self.page.goto(url, timeout=timeout, wait_until="domcontentloaded")
 
+    def _build_stream_hook(
+        self,
+        on_new_posts: Callable | None,
+        download_videos: bool,
+        video_dir: str | Path | None,
+        jsonl_path: str | Path | None,
+    ) -> Callable | None:
+        """Compose the per-batch streaming sinks shared by user_timeline/search:
+        an optional JSONL writer, an optional video downloader, and the caller's
+        own callback. Any combination runs."""
+        jsonl_cb = None
+        if jsonl_path is not None:
+            jsonl_cb = JsonlWriter(jsonl_path).append_batch
+
+        video_cb = None
+        if download_videos:
+            if video_dir is None:
+                raise ValueError("download_videos=True requires video_dir")
+
+            async def _video_cb(batch: list[dict]):
+                # Flatten internally — extractors read top-level media fields
+                # that live under node['media'] for XDTFeedItem nodes.
+                await download_videos_from_posts(post_flattener(batch), video_dir)
+
+            video_cb = _video_cb
+
+        return _combine_post_hooks([jsonl_cb, video_cb, on_new_posts])
+
     # ==================== Capture-replay primitives ====================
 
     async def _wait_for_template(
@@ -535,6 +583,7 @@ class BrowserSession:
         on_new_posts: Callable[[list[dict]], None | Awaitable[None]] | None = None,
         download_videos: bool = False,
         video_dir: str | Path | None = None,
+        jsonl_path: str | Path | None = None,
     ) -> ScrapingResult:
         """Collect a user's timeline via capture-once-then-replay.
 
@@ -544,26 +593,18 @@ class BrowserSession:
         Result codes follow the result-code taxonomy.
 
         Streaming options (fired with each batch of newly-collected raw post
-        nodes as each replayed page arrives):
-          - on_new_posts: a sync or async callback; overrides the built-in hook.
-          - download_videos + video_dir: download every mp4 to video_dir as
-            posts stream in (the built-in hook; ignored when on_new_posts set).
+        nodes as each replayed page arrives; they compose — any combination of
+        the three runs):
+          - jsonl_path: append each post as one JSON line to this file as pages
+            arrive (opt-in; the default ScrapingResult.save() still applies too).
+          - download_videos + video_dir: download every mp4 to video_dir.
+          - on_new_posts: a sync or async callback of your own.
         """
         self.endpoint = "UserTimeline"
         self.response_interceptor.flush()
-
-        effective_cb = on_new_posts
-        if effective_cb is None and download_videos:
-            if video_dir is None:
-                raise ValueError("download_videos=True requires video_dir")
-
-            async def _builtin_video_download(batch: list[dict]):
-                # Flatten internally — extractors read top-level media fields
-                # that live under node['media'] for XDTFeedItem nodes.
-                await download_videos_from_posts(post_flattener(batch), video_dir)
-
-            effective_cb = _builtin_video_download
-
+        effective_cb = self._build_stream_hook(
+            on_new_posts, download_videos, video_dir, jsonl_path
+        )
         self.response_interceptor.on_new_posts = effective_cb
 
         start_time = datetime.now(timezone.utc)
@@ -812,6 +853,7 @@ class BrowserSession:
         on_new_posts: Callable[[list[dict]], None | Awaitable[None]] | None = None,
         download_videos: bool = False,
         video_dir: str | Path | None = None,
+        jsonl_path: str | Path | None = None,
     ) -> ScrapingResult:
         """Collect the keyword-search SERP via capture-once-then-replay.
 
@@ -820,22 +862,14 @@ class BrowserSession:
         is no date cutoff — collection stops on `max_posts`, end-of-feed, or a
         no-progress streak (see stop_conditions).
 
-        Streaming options (on_new_posts / download_videos + video_dir) behave
-        exactly as in user_timeline.
+        Streaming options (jsonl_path / on_new_posts / download_videos +
+        video_dir) behave exactly as in user_timeline.
         """
         self.endpoint = "Search"
         self.response_interceptor.flush()
-
-        effective_cb = on_new_posts
-        if effective_cb is None and download_videos:
-            if video_dir is None:
-                raise ValueError("download_videos=True requires video_dir")
-
-            async def _builtin_video_download(batch: list[dict]):
-                await download_videos_from_posts(post_flattener(batch), video_dir)
-
-            effective_cb = _builtin_video_download
-
+        effective_cb = self._build_stream_hook(
+            on_new_posts, download_videos, video_dir, jsonl_path
+        )
         self.response_interceptor.on_new_posts = effective_cb
 
         start_time = datetime.now(timezone.utc)
