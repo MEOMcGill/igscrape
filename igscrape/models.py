@@ -3,6 +3,7 @@
 import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import ClassVar
 
 
@@ -110,9 +111,33 @@ class ScrapingResult:
     def to_json(self) -> str:
         return json.dumps(self.to_dict())
 
-    def save(self, path: str):
-        with open(path, "w") as f:
-            json.dump(self.to_dict(), f, indent=2)
+    def save(self, path: str, jsonl: bool | None = None):
+        """Persist the result.
+
+        Default: one pretty-printed JSON object (full result + metadata). If
+        `path` ends in .jsonl/.ndjson (or `jsonl=True`), write the raw post nodes
+        one JSON object per line instead — the same shape the streaming
+        `jsonl_path` sink produces, but written in one shot from memory.
+        """
+        p = str(path)
+        if jsonl is None:
+            jsonl = p.endswith((".jsonl", ".ndjson"))
+        with open(p, "w", encoding="utf-8") as f:
+            if jsonl:
+                for post in self.posts:
+                    f.write(json.dumps(post, default=str, ensure_ascii=False) + "\n")
+            else:
+                json.dump(self.to_dict(), f, indent=2, default=str)
+
+    def save_all(self, base: str) -> tuple[str, str]:
+        """Write BOTH `<base>.json` (full result) and `<base>.jsonl` (one raw
+        post per line). `base` may include or omit an extension. Returns the two
+        paths written, as (json_path, jsonl_path)."""
+        stem = str(Path(base).with_suffix(""))
+        json_path, jsonl_path = stem + ".json", stem + ".jsonl"
+        self.save(json_path)
+        self.save(jsonl_path)
+        return json_path, jsonl_path
 
     def add_post(self, post: dict):
         self.posts.append(post)
