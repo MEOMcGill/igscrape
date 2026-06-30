@@ -39,10 +39,17 @@ SUCCESS_CASES = {
     "no posts",
     "account is private",
     "profile is not available",
+    # Capture-replay stop codes (stop_conditions.py):
+    "max_paginations_reached",
 }
 CRASH_CASES = {
     "target crashed",
     "logged out while scraping",
+}
+# Non-retryable structural failure from the replay loop: the response shape
+# changed under us, so further attempts won't help. Return the partial result.
+PARTIAL_CASES = {
+    "response_shape_error",
 }
 
 # Rotation policy: rest after 100 handles
@@ -198,6 +205,17 @@ class Worker:
                     # post_flattener passes them through unchanged.
                     elif task.endpoint == "Search":
                         result.posts = post_flattener(result.posts)
+                    self.handles_scraped += 1
+                    return result
+
+                if result.result in PARTIAL_CASES:
+                    # Structural failure mid-scrape; not retryable. Return the
+                    # partial posts unfiltered (the shape we'd filter on is what
+                    # broke) so the caller can inspect what came back.
+                    logger.error(
+                        f"Worker {self.id}: '{result.result}' for {task.query} — "
+                        f"returning {len(result.posts)} partial posts"
+                    )
                     self.handles_scraped += 1
                     return result
 

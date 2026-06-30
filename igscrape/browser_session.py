@@ -5,8 +5,8 @@ termination conditions.
 """
 
 import asyncio
+import inspect
 import random
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
@@ -27,25 +27,28 @@ from playwright.async_api import (
 from .account import Account
 from .accounts_pool import AccountsPool
 from .downloaders import download_videos_from_posts
-from .exceptions import FailedLoginError
+from .exceptions import FailedLoginError, RateLimitError
 from .logger import logger
 from .models import Query, ScrapingResult
+from .pagination import (
+    DEFAULT_PAGE_COUNT,
+    build_replay_body,
+    errors_indicate_rate_limit,
+    merge_header_tokens,
+    parse_response,
+    select_cursor_strategy,
+)
 from .parsers import get_post_timestamp, post_flattener
 from .response import InstagramResponseInterceptor
-from .utils import get_device_os, internet_good
+from .stop_conditions import StopState, assemble_default_stop_conditions
+from .utils import get_device_os
 
 BASE_URL = "https://www.instagram.com/"
 
-
-_POST_HREF_RE = re.compile(r"^/[A-Za-z0-9_.-]+/(?:p|reel)/[A-Za-z0-9_.-]+/?$")
-
-
-def _is_post_href(href: str | None) -> bool:
-    if not href:
-        return False
-    if href.startswith("/p/") or href.startswith("/reel/"):
-        return True
-    return _POST_HREF_RE.match(href) is not None
+# Replay tuning. FINGERPRINT_EVERY: emit a small organic scroll burst every N
+# replays so the session still produces human-like page activity.
+REPLAY_TIMEOUT_MS = 30000
+FINGERPRINT_EVERY = 50
 
 
 class BrowserSession:
@@ -343,21 +346,164 @@ class BrowserSession:
         logger.debug(f"goto({url})")
         await self.page.goto(url, timeout=timeout, wait_until="domcontentloaded")
 
-    async def _find_lowest_post(self) -> Locator | None:
-        """Return the bottom-most post/reel anchor on the page,
-        or None if none visible. Ports post_scraper.py:429-454."""
-        anchors = self.page.locator("a")
-        count = await anchors.count()
-        for i in range(count):
-            j = count - 1 - i
-            elt = anchors.nth(j)
+    # ==================== Capture-replay primitives ====================
+
+    async def _wait_for_template(
+        self, label: str, timeout: float = 30.0, bootstrap_scroll: bool = True
+    ) -> dict | None:
+        """Provoke and wait for the natural request that yields `label`'s
+        template. A small scroll triggers the feed/search XHR that the response
+        interceptor captures (browser_session.py initialize()). Returns the
+        captured template, or None on timeout."""
+        elapsed = 0.0
+        while elapsed < timeout:
+            template = self.response_interceptor.templates.get(label)
+            if template is not None:
+                return template
+            if bootstrap_scroll:
+                try:
+                    await self.page.mouse.wheel(0, 3000)
+                except Exception:
+                    pass
+            await asyncio.sleep(1.0)
+            elapsed += 1.0
+        return self.response_interceptor.templates.get(label)
+
+    async def _fingerprint_scroll_burst(self, n_min: int = 2, n_max: int = 5):
+        """A short burst of real scrolls to keep the session looking human
+        while the bulk of collection happens via direct replay."""
+        try:
+            for _ in range(random.randint(n_min, n_max)):
+                await self.page.mouse.wheel(0, random.randint(2000, 5000))
+                await asyncio.sleep(random.uniform(0.3, 1.0))
+        except Exception as e:
+            logger.debug(f"fingerprint scroll failed: {e}")
+
+    async def _send_replay(
+        self, template: dict, body: str, headers: dict, timeout_ms: int = REPLAY_TIMEOUT_MS
+    ) -> tuple[str | None, str | None]:
+        """POST a replay request via the page's request context (shares cookies,
+        bypasses the page response listener so it never self-pollutes).
+
+        Returns (text, error_str). Raises RateLimitError / FailedLoginError on
+        throttle / auth responses so the worker can lock + rotate the account.
+        """
+        for attempt in range(3):
             try:
-                href = await elt.get_attribute("href")
-            except Exception:
+                resp = await self.page.request.post(
+                    template["url"], headers=headers, data=body, timeout=timeout_ms
+                )
+            except Exception as e:
+                return None, f"request error: {e}"
+
+            status = resp.status
+            if status == 200:
+                text = await resp.text()
+                if text.lstrip().startswith("<"):
+                    # An HTML body on a GraphQL endpoint means we were bounced
+                    # to a login / checkpoint wall.
+                    raise FailedLoginError("replay returned HTML (login bounce)")
+                return text, None
+            if status in (401, 403):
+                raise FailedLoginError(f"replay status {status}")
+            if status == 429:
+                raise RateLimitError("replay status 429")
+            if 500 <= status < 600:
+                await asyncio.sleep(2 * (attempt + 1))
                 continue
-            if _is_post_href(href):
-                return elt
-        return None
+            return None, f"replay status {status}"
+        return None, "replay failed after retries (5xx)"
+
+    async def _replay_pagination_loop(
+        self,
+        *,
+        label: str,
+        template: dict,
+        stop_conditions: list,
+        strategy,
+        start_unix: int | None,
+        on_new_posts: Callable | None,
+        params: dict,
+    ) -> str:
+        """The shared collection engine. Replays the captured request with an
+        advancing cursor until a stop condition fires. Endpoint-specific
+        behavior is supplied entirely via `stop_conditions` + `strategy`."""
+        interceptor = self.response_interceptor
+        cursor = strategy.initial_cursor(template)
+        count = params.get("page_count", DEFAULT_PAGE_COUNT)
+        iter_index = 0
+        no_progress_streak = 0
+
+        while True:
+            body = build_replay_body(
+                template, cursor, count, strategy,
+                latest_form=interceptor.latest_request_form,
+            )
+            headers = merge_header_tokens(
+                template["headers"], interceptor.latest_request_headers
+            )
+            text, err = await self._send_replay(template, body, headers)
+
+            payloads: list[dict] = []
+            errors: list[dict] = []
+            if text is not None:
+                payloads, errors = parse_response(text)
+            if errors and errors_indicate_rate_limit(errors):
+                raise RateLimitError("; ".join(str(e.get("message")) for e in errors))
+
+            error_str = err
+            if errors and not error_str:
+                error_str = "; ".join(str(e.get("message") or e) for e in errors)
+
+            new_posts = interceptor.ingest_payloads(payloads)
+            end_cursor, has_next = strategy.extract(payloads)
+
+            ts_list: list[int] = []
+            for post in new_posts:
+                dt = get_post_timestamp(post)
+                if dt is not None:
+                    ts_list.append(int(dt.timestamp()))
+
+            no_progress_streak = no_progress_streak + 1 if not new_posts else 0
+
+            if new_posts and on_new_posts is not None:
+                try:
+                    res = on_new_posts(new_posts)
+                    if inspect.isawaitable(res):
+                        await res
+                except Exception as e:
+                    logger.warning(f"on_new_posts hook raised: {e}")
+
+            state = StopState(
+                iter_index=iter_index,
+                cursor_sent=cursor,
+                end_cursor=end_cursor,
+                has_next_page=has_next,
+                new_count=len(new_posts),
+                all_count=len(interceptor.post_metadata_list),
+                oldest_in_batch_unix=min(ts_list) if ts_list else None,
+                timestamped_count=len(ts_list),
+                error=error_str,
+                start_unix=start_unix,
+                no_progress_streak=no_progress_streak,
+            )
+
+            logger.info(
+                f"{label}: replay #{iter_index} +{len(new_posts)} "
+                f"(total {state.all_count}), next={'yes' if has_next else 'no'}"
+            )
+
+            for cond in stop_conditions:
+                code = cond.evaluate(state)
+                if code is not None:
+                    return code
+
+            cursor = end_cursor
+            iter_index += 1
+            await self.pool.update_scroll_count(self.account.username, self.endpoint, 1)
+            if iter_index % FINGERPRINT_EVERY == 0:
+                await self._fingerprint_scroll_burst()
+            await asyncio.sleep(random.uniform(0.5, 1.5))
 
     async def _failed_to_load_gate(self, handle: str) -> bool:
         """The 'Failed to Load / Retry' popup (post_scraper.py:173-187)."""
@@ -386,13 +532,15 @@ class BrowserSession:
         download_videos: bool = False,
         video_dir: str | Path | None = None,
     ) -> ScrapingResult:
-        """Scroll a user's profile, collect XHR-intercepted posts, stop at start_date
-        or when the same post has been the lowest visible post too many times.
+        """Collect a user's timeline via capture-once-then-replay.
 
-        Scrapes a user's home page; result codes follow the result-code taxonomy.
+        Navigates to the profile, captures the feed GraphQL request once, then
+        replays it with an advancing cursor (no continuous scrolling). Stops on
+        the start date, end-of-feed, or a safety cap (see stop_conditions).
+        Result codes follow the result-code taxonomy.
 
-        Streaming options (fired with each batch of newly-intercepted raw post
-        nodes as they arrive during scrolling):
+        Streaming options (fired with each batch of newly-collected raw post
+        nodes as each replayed page arrives):
           - on_new_posts: a sync or async callback; overrides the built-in hook.
           - download_videos + video_dir: download every mp4 to video_dir as
             posts stream in (the built-in hook; ignored when on_new_posts set).
@@ -437,153 +585,60 @@ class BrowserSession:
                 time_taken=datetime.now(timezone.utc) - start_time,
             )
 
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        start_unix = int(start_dt.timestamp())
+
         target_url = f"{BASE_URL}{handle}/"
-        await self._goto(target_url)
+        try:
+            await self._goto(target_url)
+        except PWTimeoutError:
+            return _result("timeout error")
         await asyncio.sleep(5)
 
-        total_scrolls = 0
-        prev_post_url: str | None = None
-        repeated_post_count = 0
-        num_retries_lowest_post = 0
-        internet_bad_count = 0
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        # Availability / access gates before we commit to replaying.
+        if await self.page.get_by_text("Profile isn't available").count() > 0:
+            return _result("profile is not available")
+        if await self.page.get_by_text("Sorry, this page isn't available").count() > 0:
+            return _result("no posts")
+        if (
+            await self.page.get_by_text("This account is private").count() > 0
+            or await self.page.get_by_text("account is private").count() > 0
+        ):
+            return _result("account is private")
+        if await self._failed_to_load_gate(handle):
+            return _result("failed to load")
 
-        while True:
-            # Outer-loop rate-limit check (post_scraper.py:482)
-            if await self._failed_to_load_gate(handle):
-                return _result("failed to load")
+        # Capture the feed request template (a bootstrap scroll provokes it),
+        # then collect by replaying it directly — no further scrolling.
+        template = await self._wait_for_template("user_timeline", timeout=30.0)
+        if template is None:
+            if await self.page.get_by_text("No Posts Yet").count() > 0:
+                return _result("no posts")
+            return _result("timeout error")
 
-            try:
-                # Re-navigate if we got pushed off the target page
-                if self.page.url != target_url:
-                    await self._goto(target_url)
-                    await asyncio.sleep(5)
-                    if self.page.url != target_url:
-                        return _result("logged out while scraping")
+        params = {
+            "max_posts": -1,
+            "max_paginations": 5000,
+            "max_no_progress_streak": 5,
+        }
+        strategy = select_cursor_strategy(template)
+        conditions = assemble_default_stop_conditions("UserTimeline", params)
 
-                # Inner scroll loop: find the lowest post (with retries)
-                while True:
-                    if await self.page.get_by_role("button", name="Retry").count() > 0:
-                        if (
-                            await self.page.get_by_text("account is private").count()
-                            > 0
-                        ):
-                            return _result("account is private")
-                        if await self.page.get_by_text("Failed to Load").count() > 0:
-                            return _result("failed to load")
-
-                    if (
-                        await self.page.get_by_role(
-                            "button", name="Reload page"
-                        ).count()
-                        > 0
-                    ):
-                        if (
-                            await self.page.get_by_text(
-                                "Something went wrong"
-                            ).count()
-                            > 0
-                        ):
-                            return _result("something went wrong - reload")
-
-                    if (
-                        await self.page.get_by_text("Profile isn't available").count()
-                        > 0
-                    ):
-                        return _result("profile is not available")
-
-                    try:
-                        lowest_post = await self._find_lowest_post()
-                        num_retries_lowest_post = 0
-                        break
-                    except Exception as e:
-                        msg = str(e)
-                        logger.warning(f"find_lowest_post error: {msg}")
-                        if msg == "Target crashed":
-                            return _result("target crashed")
-                        num_retries_lowest_post += 1
-                        if num_retries_lowest_post > 5:
-                            raise
-                        await asyncio.sleep(5)
-
-                if lowest_post is None:
-                    if (
-                        await self.page.get_by_text(
-                            "Sorry, this page isn't available"
-                        ).count()
-                        > 0
-                    ):
-                        return _result("no posts")
-                    if await self.page.get_by_text("No Posts Yet").count() > 0:
-                        return _result("no posts")
-                    if (
-                        await self.page.get_by_text("This account is private").count()
-                        > 0
-                    ):
-                        return _result("no posts")
-                    return _result("timeout error")
-
-                try:
-                    lowest_post_url = await lowest_post.get_attribute("href")
-                except Exception as e:
-                    logger.error(f"Failed to read lowest post href: {e}")
-                    raise
-
-                try:
-                    await lowest_post.scroll_into_view_if_needed()
-                except Exception as e:
-                    logger.warning(f"scroll_into_view failed: {e}")
-                total_scrolls += 1
-                await self.pool.update_scroll_count(
-                    self.account.username, self.endpoint, 1
-                )
-
-                # Date check on lowest intercepted post
-                lowest_ts = self._get_lowest_post_datetime_utc()
-                if lowest_ts is None:
-                    return _result("timeout error")
-
-                logger.info(
-                    f"@{handle}: lowest post {lowest_ts}, target start {start_date}, "
-                    f"scroll #{total_scrolls}, posts={len(self.response_interceptor.post_metadata_list)}"
-                )
-
-                if lowest_ts < start_dt:
-                    return _result(
-                        "scraped until user-specified starting date was reached"
-                    )
-
-                # Repetition detection
-                if lowest_post_url == prev_post_url:
-                    repeated_post_count += 1
-                    if repeated_post_count > 15:
-                        if not internet_good():
-                            internet_bad_count += 1
-                            repeated_post_count = 0
-                            if internet_bad_count > 10:
-                                return _result("bad internet")
-                    if repeated_post_count > 20:
-                        return _result("scraped until first ever post was reached")
-                else:
-                    repeated_post_count = 0
-
-                prev_post_url = lowest_post_url
-                await asyncio.sleep(1)
-
-            except PWTimeoutError:
-                return _result("timeout error")
-            except Exception as e:
-                msg = str(e)
-                logger.error(f"Unexpected error scraping @{handle}: {e}")
-                if msg == "Target crashed":
-                    return _result("target crashed")
-                raise
-
-    def _get_lowest_post_datetime_utc(self) -> datetime | None:
-        posts = self.response_interceptor.post_metadata_list
-        if not posts:
-            return None
-        return get_post_timestamp(posts[-1])
+        try:
+            code = await self._replay_pagination_loop(
+                label=f"@{handle}",
+                template=template,
+                stop_conditions=conditions,
+                strategy=strategy,
+                start_unix=start_unix,
+                on_new_posts=effective_cb,
+                params=params,
+            )
+        except PWTimeoutError:
+            return _result("timeout error")
+        # RateLimitError / FailedLoginError propagate to the worker, which locks
+        # + rotates the account; no need to translate them to a result code here.
+        return _result(code)
 
     # ==================== Scraping: user_profile ====================
 
@@ -754,12 +809,12 @@ class BrowserSession:
         download_videos: bool = False,
         video_dir: str | Path | None = None,
     ) -> ScrapingResult:
-        """Scroll the keyword-search SERP, collecting XHR-intercepted posts.
+        """Collect the keyword-search SERP via capture-once-then-replay.
 
-        Mirrors user_timeline's scroll/repetition machinery but stops on a
-        `max_posts` cap (search results aren't reliably chronological, so there
-        is no date cutoff). The repeated-lowest-post counter is the only other
-        stop condition — the safety net against endless scrolling.
+        Captures the SERP GraphQL request once, then replays it with an
+        advancing cursor. Search results aren't reliably chronological, so there
+        is no date cutoff — collection stops on `max_posts`, end-of-feed, or a
+        no-progress streak (see stop_conditions).
 
         Streaming options (on_new_posts / download_videos + video_dir) behave
         exactly as in user_timeline.
@@ -797,108 +852,38 @@ class BrowserSession:
             )
 
         target_url = f"{BASE_URL}explore/search/keyword/?q={quote(keyword)}"
-        await self._goto(target_url)
+        try:
+            await self._goto(target_url)
+        except PWTimeoutError:
+            return _result("timeout error")
         await asyncio.sleep(5)
         if not await self._reauth_if_bounced(target_url):
             return _result("logged out while scraping")
 
-        prev_post_url: str | None = None
-        repeated_post_count = 0
-        num_retries_lowest_post = 0
+        # Capture the SERP request template, then replay it directly.
+        template = await self._wait_for_template("search", timeout=30.0)
+        if template is None:
+            return _result("no posts")
 
-        while True:
-            if await self._failed_to_load_gate_url(target_url):
-                return _result("failed to load")
+        params = {
+            "max_posts": max_posts,
+            "max_paginations": 2000,
+            "max_no_progress_streak": 5,
+        }
+        strategy = select_cursor_strategy(template)
+        conditions = assemble_default_stop_conditions("Search", params)
 
-            try:
-                if self.page.url != target_url and "accounts/login" not in self.page.url:
-                    await self._goto(target_url)
-                    await asyncio.sleep(5)
-                if not await self._reauth_if_bounced(target_url):
-                    return _result("logged out while scraping")
-
-                # Post-count cap (primary stop condition)
-                if (max_posts > 0) and (len(self.response_interceptor.post_metadata_list) >= max_posts):
-                    return _result("success")
-
-                # Inner scroll loop: find the lowest post (with retries)
-                while True:
-                    if await self.page.get_by_role("button", name="Retry").count() > 0:
-                        if await self.page.get_by_text("Failed to Load").count() > 0:
-                            return _result("failed to load")
-                    if (
-                        await self.page.get_by_role(
-                            "button", name="Reload page"
-                        ).count()
-                        > 0
-                        and await self.page.get_by_text("Something went wrong").count()
-                        > 0
-                    ):
-                        return _result("something went wrong - reload")
-
-                    try:
-                        lowest_post = await self._find_lowest_post()
-                        num_retries_lowest_post = 0
-                        break
-                    except Exception as e:
-                        msg = str(e)
-                        logger.warning(f"find_lowest_post error: {msg}")
-                        if msg == "Target crashed":
-                            return _result("target crashed")
-                        num_retries_lowest_post += 1
-                        if num_retries_lowest_post > 5:
-                            raise
-                        await asyncio.sleep(5)
-
-                if lowest_post is None:
-                    # No post anchors yet: keep scrolling a few times, then give
-                    # up. If we already have posts, treat it as the end.
-                    if self.response_interceptor.post_metadata_list:
-                        return _result("success")
-                    await self.page.mouse.wheel(0, 4000)
-                    await asyncio.sleep(2)
-                    repeated_post_count += 1
-                    if repeated_post_count > 10:
-                        return _result("no posts")
-                    continue
-
-                try:
-                    lowest_post_url = await lowest_post.get_attribute("href")
-                except Exception as e:
-                    logger.error(f"Failed to read lowest post href: {e}")
-                    raise
-
-                try:
-                    await lowest_post.scroll_into_view_if_needed()
-                except Exception as e:
-                    logger.warning(f"scroll_into_view failed: {e}")
-                await self.pool.update_scroll_count(
-                    self.account.username, self.endpoint, 1
-                )
-
-                logger.info(
-                    f"search '{keyword}': posts="
-                    f"{len(self.response_interceptor.post_metadata_list)}/{max_posts if max_posts > 0 else '∞'}, "
-                    f"repeated={repeated_post_count}"
-                )
-
-                # Repetition detection — the SERP stopped yielding new posts.
-                if lowest_post_url == prev_post_url:
-                    repeated_post_count += 1
-                    if repeated_post_count > 20:
-                        return _result("scraped until first ever post was reached")
-                else:
-                    repeated_post_count = 0
-
-                prev_post_url = lowest_post_url
-                await asyncio.sleep(1)
-
-            except PWTimeoutError:
-                return _result("timeout error")
-            except Exception as e:
-                msg = str(e)
-                logger.error(f"Unexpected error searching '{keyword}': {e}")
-                if msg == "Target crashed":
-                    return _result("target crashed")
-                raise
+        try:
+            code = await self._replay_pagination_loop(
+                label=f"search:{keyword}",
+                template=template,
+                stop_conditions=conditions,
+                strategy=strategy,
+                start_unix=None,
+                on_new_posts=effective_cb,
+                params=params,
+            )
+        except PWTimeoutError:
+            return _result("timeout error")
+        return _result(code)
 
