@@ -403,6 +403,22 @@ class BrowserSession:
             pass
         return False
 
+    def _intercepted_is_private(self, handle: str) -> bool:
+        """Whether the intercepted profile response marks this handle private.
+
+        The profile GraphQL response (data['user']) carries the authoritative
+        is_private flag. Only consulted in the no-posts-visible / load-failure
+        branches below, so a private account we *follow* (which returns posts
+        normally and never reaches those branches) isn't affected — no need to
+        also check viewer-follow state.
+        """
+        for user in self.response_interceptor.user_metadata_list:
+            if user.get("username", "").lower() == handle.lower() and user.get(
+                "is_private"
+            ):
+                return True
+        return False
+
     # ==================== Scraping: user_timeline ====================
 
     async def user_timeline(
@@ -477,8 +493,12 @@ class BrowserSession:
         start_dt = datetime.strptime(start_date, "%Y-%m-%d")
 
         while True:
-            # Outer-loop rate-limit check (post_scraper.py:482)
+            # Outer-loop rate-limit check (post_scraper.py:482). A private
+            # account we don't follow renders no grid and can trip this gate —
+            # classify it authoritatively before treating it as a rate-limit.
             if await self._failed_to_load_gate(handle):
+                if self._intercepted_is_private(handle):
+                    return _result("account is private")
                 return _result("failed to load")
 
             try:
@@ -492,6 +512,8 @@ class BrowserSession:
                 # Inner scroll loop: find the lowest post (with retries)
                 while True:
                     if await self.page.get_by_role("button", name="Retry").count() > 0:
+                        if self._intercepted_is_private(handle):
+                            return _result("account is private")
                         if (
                             await self.page.get_by_text("account is private").count()
                             > 0
@@ -535,6 +557,8 @@ class BrowserSession:
                         await asyncio.sleep(5)
 
                 if lowest_post is None:
+                    if self._intercepted_is_private(handle):
+                        return _result("account is private")
                     if (
                         await self.page.get_by_text(
                             "Sorry, this page isn't available"
