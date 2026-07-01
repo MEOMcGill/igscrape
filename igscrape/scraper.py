@@ -141,6 +141,22 @@ class InstagramScraper:
             await self.worker_pool.close()
             self.worker_pool = None
 
+    async def restart(self):
+        """Tear down the worker pool and its browser sessions so the next task
+        lazily rebuilds a fresh pool.
+
+        Used to recover a wedged browser session (e.g. after repeated timeouts)
+        without aborting the run. worker.close() releases the account, so the
+        rebuilt pool re-acquires it cleanly. A wedged session could make the
+        graceful close() hang, so bound it and force re-init on timeout.
+        """
+        logger.info("Restarting scraper: tearing down worker pool to recover session")
+        try:
+            await asyncio.wait_for(self.close(), timeout=120)
+        except asyncio.TimeoutError:
+            logger.warning("worker pool did not close within 120s; forcing re-init")
+            self.worker_pool = None
+
     async def __aenter__(self):
         return self
 
