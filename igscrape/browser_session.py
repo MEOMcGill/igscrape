@@ -359,6 +359,34 @@ class BrowserSession:
                 return elt
         return None
 
+    async def _wait_for_first_post(self, timeout: float = 25.0, poll: float = 1.0) -> None:
+        """Wait for the profile's post grid to render before snapshotting it.
+
+        Instagram populates the grid asynchronously after ``domcontentloaded``,
+        so a fixed short sleep followed by a single ``_find_lowest_post()``
+        snapshot spuriously returns "timeout error" whenever the grid is slow to
+        load (common over a VPN or on heavy profiles). Poll until a post anchor
+        appears, a terminal empty/error state is shown, or ``timeout`` elapses —
+        then let the caller's normal logic take its snapshot.
+        """
+        empty_state_texts = (
+            "Profile isn't available",
+            "Sorry, this page isn't available",
+            "No Posts Yet",
+            "This account is private",
+        )
+        for _ in range(max(1, int(timeout / poll))):
+            for text in empty_state_texts:
+                if await self.page.get_by_text(text).count() > 0:
+                    return
+            try:
+                if await self._find_lowest_post() is not None:
+                    return
+            except Exception:
+                pass
+            await asyncio.sleep(poll)
+        logger.warning(f"no post anchor rendered within {timeout:.0f}s")
+
     async def _failed_to_load_gate(self, handle: str) -> bool:
         """The 'Failed to Load / Retry' popup (post_scraper.py:173-187)."""
         return await self._failed_to_load_gate_url(f"{BASE_URL}{handle}/")
@@ -439,7 +467,7 @@ class BrowserSession:
 
         target_url = f"{BASE_URL}{handle}/"
         await self._goto(target_url)
-        await asyncio.sleep(5)
+        await self._wait_for_first_post()
 
         total_scrolls = 0
         prev_post_url: str | None = None
