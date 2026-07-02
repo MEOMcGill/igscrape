@@ -1,15 +1,22 @@
 """Flatten scraped Instagram posts into a tidy row-per-post representation.
 
 Produces a consistent, analysis-friendly schema out of the ~90-key raw posts.
-Writes CSV (stdlib) or Parquet (via polars, if installed).
+Writes CSV (stdlib), JSONL (stdlib), or Parquet (via polars, if installed).
 """
 
 import csv
+import gzip
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
 BASE_URL = "https://www.instagram.com/"
+
+# Input file extensions the flattener understands (single file or a directory
+# of these). Covers both the ScrapingResult .json save and the streamed .jsonl.
+INPUT_EXTS = (".json", ".json.gz", ".jsonl", ".jsonl.gz", ".ndjson", ".ndjson.gz")
+_FMT_SUFFIX = {"csv": ".csv", "jsonl": ".jsonl", "parquet": ".parquet"}
 
 
 def _iso(ts) -> str | None:
@@ -158,7 +165,8 @@ def write_parquet(rows: list[dict], path: str | Path):
 def export_posts(input_path: str | Path, output_path: str | Path) -> int:
     """Read a scraped JSON file, flatten posts, write to CSV or Parquet based on ext.
 
-    Returns the number of rows written.
+    Returns the number of rows written. Kept for backwards compatibility — new
+    callers can use the more capable `flatten_paths()`.
     """
     with open(input_path) as f:
         payload = json.load(f)
@@ -171,3 +179,157 @@ def export_posts(input_path: str | Path, output_path: str | Path) -> int:
     else:
         write_csv(rows, out)
     return len(rows)
+
+
+# ==================== Batch flatten engine (fbscrape-style) ====================
+
+
+def _open_maybe_gz(path: str):
+    if str(path).endswith(".gz"):
+        return gzip.open(path, "rt", encoding="utf-8")
+    return open(path, "r", encoding="utf-8")
+
+
+def load_posts(path: str | Path) -> list[dict]:
+    """Load raw post nodes from a scrape file, format inferred from extension.
+
+    Accepts:
+      - .json / .json.gz : a ScrapingResult dict ({"posts": [...]}), a bare list
+        of posts, or a single post dict.
+      - .jsonl / .ndjson (.gz) : one raw post node per line (the streamed sink
+        format written by jsonl_store / ScrapingResult.save to .jsonl).
+    """
+    p = str(path)
+    is_jsonl = any(p.endswith(e) for e in (".jsonl", ".jsonl.gz", ".ndjson", ".ndjson.gz"))
+    with _open_maybe_gz(p) as f:
+        if is_jsonl:
+            out = []
+            for line in f:
+                line = line.strip()
+                if line:
+                    out.append(json.loads(line))
+            return out
+        payload = json.load(f)
+    if isinstance(payload, dict):
+        if "posts" in payload:
+            return payload.get("posts") or []
+        return [payload]  # a single bare post dict
+    if isinstance(payload, list):
+        return payload
+    return []
+
+
+def write_jsonl(rows: list[dict], path: str | Path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, default=str, ensure_ascii=False) + "\n")
+
+
+def _write_rows(rows: list[dict], path: str | Path, fmt: str):
+    if fmt == "csv":
+        write_csv(rows, path)
+    elif fmt == "jsonl":
+        write_jsonl(rows, path)
+    elif fmt == "parquet":
+        write_parquet(rows, path)
+    else:
+        raise ValueError(f"Unknown format: {fmt}")
+
+
+def _input_stem(path: str) -> str:
+    """File name minus a (possibly double) input extension: foo.json.gz -> foo."""
+    name = Path(path).name
+    for ext in sorted(INPUT_EXTS, key=len, reverse=True):
+        if name.endswith(ext):
+            return name[: -len(ext)]
+    return Path(path).stem
+
+
+def _looks_like_file(output: str) -> bool:
+    return Path(output).suffix.lower() in (".csv", ".jsonl", ".parquet")
+
+
+def flatten_paths(
+    input_path: str | Path,
+    output: str | Path | None = None,
+    fmt: str = "csv",
+    concat: bool = False,
+) -> int:
+    """Flatten one file OR a directory of scrape files into CSV / JSONL / Parquet.
+
+    A backwards-compatible superset of `export_posts()`: adds directory input,
+    `.jsonl`/`.gz` inputs, JSONL output, the `"all"` format, and `--concat`.
+    Returns the total number of rows written (summed across formats for "all").
+
+    Output resolution:
+      - concat: merge all inputs into the single `output` file (per format).
+      - single file + file-like `output`: write there (suffix adjusted per format).
+      - otherwise: per-file outputs land in the `output` folder (or the input
+        dir / the input file's parent when `output` is omitted).
+    """
+    input_path = str(input_path)
+    formats = ["csv", "jsonl", "parquet"] if fmt == "all" else [fmt]
+    is_dir = os.path.isdir(input_path)
+
+    if is_dir:
+        files = sorted(
+            os.path.join(input_path, f)
+            for f in os.listdir(input_path)
+            if any(f.endswith(e) for e in INPUT_EXTS)
+        )
+        if not files:
+            raise ValueError(f"No .json/.jsonl scrape files found in {input_path}")
+    else:
+        files = [input_path]
+
+    # --- concat: everything into one output file per format ---
+    if concat:
+        if output is None or not _looks_like_file(str(output)):
+            raise ValueError("--concat requires --output to be a file path")
+        rows = flatten_posts([p for fp in files for p in load_posts(fp)])
+        if not rows:
+            raise ValueError("No posts found across inputs")
+        for fm in formats:
+            _write_rows(rows, Path(output).with_suffix(_FMT_SUFFIX[fm]), fm)
+        return len(rows) * len(formats)
+
+    # --- single file -> single named output ---
+    if (
+        len(files) == 1
+        and output is not None
+        and _looks_like_file(str(output))
+        and not (os.path.isdir(str(output)) or str(output).endswith(os.sep))
+    ):
+        rows = flatten_posts(load_posts(files[0]))
+        base = Path(output)
+        for fm in formats:
+            out = (
+                base
+                if (fmt != "all" and base.suffix.lower() == _FMT_SUFFIX[fm])
+                else base.with_suffix(_FMT_SUFFIX[fm])
+            )
+            _write_rows(rows, out, fm)
+        return len(rows) * len(formats)
+
+    # --- per-file outputs into a folder ---
+    if len(files) > 1 and output is not None and _looks_like_file(str(output)):
+        raise ValueError(
+            "Multiple input files: --output must be a folder (or use --concat)"
+        )
+    out_dir = (
+        Path(output)
+        if output is not None
+        else (Path(input_path) if is_dir else Path(input_path).parent)
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    total = 0
+    for fp in files:
+        rows = flatten_posts(load_posts(fp))
+        if not rows:
+            continue  # skip empty scrapes (e.g. a "no posts" result)
+        for fm in formats:
+            _write_rows(rows, out_dir / f"{_input_stem(fp)}{_FMT_SUFFIX[fm]}", fm)
+            total += len(rows)
+    return total
