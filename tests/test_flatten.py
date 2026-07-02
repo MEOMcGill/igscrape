@@ -70,7 +70,6 @@ def test_flatten_single_file_jsonl_input_to_jsonl(tmp_path):
 
 
 def test_flatten_format_all_writes_three(tmp_path):
-    pytest.importorskip("polars")
     src = tmp_path / "in.json"
     src.write_text(json.dumps({"posts": [_post("1")]}))
     out = tmp_path / "flat.csv"

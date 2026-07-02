@@ -1,7 +1,7 @@
 """Flatten scraped Instagram posts into a tidy row-per-post representation.
 
 Produces a consistent, analysis-friendly schema out of the ~90-key raw posts.
-Writes CSV (stdlib), JSONL (stdlib), or Parquet (via polars, if installed).
+Writes CSV (stdlib), JSONL (stdlib), or Parquet (via polars).
 """
 
 import csv
@@ -151,12 +151,10 @@ def write_csv(rows: list[dict], path: str | Path):
 
 
 def write_parquet(rows: list[dict], path: str | Path):
-    try:
-        import polars as pl
-    except ImportError as e:
-        raise RuntimeError(
-            "Parquet output requires polars. `pip install polars`"
-        ) from e
+    # polars is a hard dependency; imported lazily so CSV/JSONL flattens and the
+    # CLI don't pay its import cost when Parquet isn't being written.
+    import polars as pl
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     pl.DataFrame(rows).write_parquet(path)
