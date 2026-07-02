@@ -28,7 +28,7 @@ from .account import Account
 from .accounts_pool import AccountsPool
 from .downloaders import download_videos_from_posts
 from .exceptions import FailedLoginError, RateLimitError
-from .jsonl_store import JsonlWriter
+from .exporter import append_jsonl
 from .logger import logger
 from .models import Query, ScrapingResult
 from .pagination import (
@@ -378,7 +378,11 @@ class BrowserSession:
         own callback. Any combination runs."""
         jsonl_cb = None
         if jsonl_path is not None:
-            jsonl_cb = JsonlWriter(jsonl_path).append_batch
+
+            def _jsonl_cb(batch: list[dict], _path=str(jsonl_path)):
+                append_jsonl(batch, _path)
+
+            jsonl_cb = _jsonl_cb
 
         video_cb = None
         if download_videos:

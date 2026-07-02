@@ -197,7 +197,7 @@ def load_posts(path: str | Path) -> list[dict]:
       - .json / .json.gz : a ScrapingResult dict ({"posts": [...]}), a bare list
         of posts, or a single post dict.
       - .jsonl / .ndjson (.gz) : one raw post node per line (the streamed sink
-        format written by jsonl_store / ScrapingResult.save to .jsonl).
+        format written by the streaming sink / ScrapingResult.save to .jsonl).
     """
     p = str(path)
     is_jsonl = any(p.endswith(e) for e in (".jsonl", ".jsonl.gz", ".ndjson", ".ndjson.gz"))
@@ -219,12 +219,31 @@ def load_posts(path: str | Path) -> list[dict]:
     return []
 
 
+def _dump_jsonl(rows: list[dict], f):
+    for row in rows:
+        f.write(json.dumps(row, default=str, ensure_ascii=False) + "\n")
+
+
 def write_jsonl(rows: list[dict], path: str | Path):
+    """Write rows to a .jsonl file (one JSON object per line), truncating."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, default=str, ensure_ascii=False) + "\n")
+        _dump_jsonl(rows, f)
+
+
+def append_jsonl(rows: list[dict], path: str | Path):
+    """Append rows to a .jsonl file (one JSON object per line).
+
+    Used by the scrape streaming sink to write each page of posts as it arrives
+    (append mode → the file is valid at every point and survives a crash).
+    """
+    if not rows:
+        return
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        _dump_jsonl(rows, f)
 
 
 def _write_rows(rows: list[dict], path: str | Path, fmt: str):
