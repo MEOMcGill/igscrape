@@ -406,8 +406,10 @@ class BrowserSession:
         """Scroll to provoke, and wait for, the request that yields `label`'s
         replayable template.
 
-        Instagram paginates with a *different* query than the first page (the
-        paginating one carries the cursor + the doc_id we must replay), so by
+        Instagram paginates with a *different* query than the first page (e.g.
+        profile: PolarisProfilePostsQuery for page 1 vs
+        PolarisProfilePostsTabContentQuery_connection for pagination — only the
+        latter carries the `after` cursor + the doc_id we must replay), so by
         default we keep scrolling until a cursor-bearing template is captured.
         Falls back to whatever was captured (the initial-page template) if the
         paginating request never fires before `timeout`."""
@@ -416,14 +418,27 @@ class BrowserSession:
             template = self.response_interceptor.templates.get(label)
             if template is not None and (template.get("_has_cursor") or not require_cursor):
                 return template
-            # Scroll to trigger the next-page (pagination) XHR.
-            try:
-                await self.page.mouse.wheel(0, 3000)
-            except Exception:
-                pass
+            await self._provoke_scroll()
             await asyncio.sleep(1.0)
             elapsed += 1.0
         return self.response_interceptor.templates.get(label)
+
+    async def _provoke_scroll(self):
+        """Nudge the page so its infinite-scroll fires the next-page request.
+
+        A fixed `mouse.wheel` delta doesn't reliably reach a profile's posts
+        grid, so scroll to the current document bottom via JS (as more loads,
+        scrollHeight grows and the next call goes further) and add a wheel nudge
+        to trip wheel-based observers. Works for both the profile grid and the
+        search SERP."""
+        try:
+            await self.page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        except Exception:
+            pass
+        try:
+            await self.page.mouse.wheel(0, 3000)
+        except Exception:
+            pass
 
     async def _fingerprint_scroll_burst(self, n_min: int = 2, n_max: int = 5):
         """A short burst of real scrolls to keep the session looking human
