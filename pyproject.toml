@@ -9,8 +9,12 @@ description = "Instagram scraping library with account management."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "playwright>=1.40.0",
-    "camoufox>=0.4.0",
+    # Pinned as a pair: the Camoufox browser binary speaks a specific Playwright
+    # protocol. Camoufox declares only an unbounded "playwright" dep, so without
+    # this pin uv resolves the latest Playwright (e.g. 1.61), whose new_context
+    # protocol the 0.4.11 browser rejects ("...viewport.isMobile... not in scheme").
+    "playwright==1.58.0",
+    "camoufox==0.4.11",
     "aiosqlite>=0.19.0",
     "aiohttp>=3.9.0",
     "click>=8.0.0",
