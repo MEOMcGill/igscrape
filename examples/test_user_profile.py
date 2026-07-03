@@ -14,9 +14,11 @@ async def main():
         print(f"result={result.result}, users={len(result.users)}")
         if result.users:
             u = result.users[0]
+            # web_profile_info nests the follower count under edge_followed_by.
+            followers = (u.get("edge_followed_by") or {}).get("count")
             print(
                 f"  {u.get('username')}: "
-                f"{u.get('full_name')} | {u.get('follower_count')} followers"
+                f"{u.get('full_name')} | {followers} followers"
             )
 
 
