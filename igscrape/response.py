@@ -190,27 +190,32 @@ class InstagramResponseInterceptor:
         self.latest_request_form = form
         self.latest_request_headers = headers
 
-        keys = data.keys()
-        if any(k in keys for k in FEED_DATA_KEYS):
-            label = "user_timeline"
-        elif any(k in keys for k in SEARCH_DATA_KEYS):
-            label = "search"
-        elif "user" in keys:
-            # The profile-info GraphQL query (data['user']) — capture it so we
-            # can resolve later handles by *replaying* this signed request (with
-            # the username swapped) instead of hitting the bare web_profile_info
-            # REST endpoint, which Instagram 429s aggressively. Keyed by username,
-            # so no cursor is involved.
-            label = "profile"
-        else:
-            return
-
         variables: dict = {}
         if "variables" in form:
             try:
                 variables = json.loads(form["variables"])
             except Exception:
                 variables = {}
+
+        keys = data.keys()
+        is_feed = any(k in keys for k in FEED_DATA_KEYS)
+
+        # The username-keyed profile-posts query (PolarisProfilePostsQuery)
+        # resolves a handle -> owner id + first page. Capture it separately as the
+        # profile resolver: it is replayed with the username swapped in, a signed
+        # GraphQL request that (unlike the 429-prone web_profile_info REST call)
+        # reads as ordinary web-app traffic. It never doubles as the paginating
+        # template below — that one is cursor/id-keyed and carries no username.
+        if is_feed and variables.get("username"):
+            self._store_template("profile_posts", request, headers, form, variables)
+            return
+
+        if is_feed:
+            label = "user_timeline"
+        elif any(k in keys for k in SEARCH_DATA_KEYS):
+            label = "search"
+        else:
+            return
 
         # Instagram uses a SEPARATE query for pagination than for the first page
         # (e.g. PolarisKeywordSearchExplorePageRelayQuery vs ...PaginationQuery):
@@ -221,7 +226,17 @@ class InstagramResponseInterceptor:
         existing = self.templates.get(label)
         if existing is not None and existing.get("_has_cursor") and not has_cursor:
             return
+        self._store_template(label, request, headers, form, variables, has_cursor)
 
+    def _store_template(
+        self,
+        label: str,
+        request: Request,
+        headers: dict,
+        form: dict,
+        variables: dict,
+        has_cursor: bool = False,
+    ):
         self.templates[label] = {
             "url": request.url,
             "method": request.method,

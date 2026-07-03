@@ -16,17 +16,23 @@ time to watch the single seed navigation.
 """
 
 import asyncio
+import os
 import sys
 
 from igscrape import InstagramScraper
+from igscrape.cli import get_default_db
 from igscrape.exceptions import RateLimitError
 from igscrape.logger import set_log_level
 
 set_log_level("DEBUG")  # shows "captured 'profile' template" + replay logs
 
+# Accounts DB: IGSCRAPE_DB env var wins, else the standard <repo>/db/accounts.db.
+DB = os.environ.get("IGSCRAPE_DB") or get_default_db()
+
 
 async def main(handles: list[str]):
-    async with InstagramScraper(headless=False, max_browser_sessions=1) as scraper:
+    print(f"using accounts db: {DB}")
+    async with InstagramScraper(db=DB, headless=False, max_browser_sessions=1) as scraper:
         for i, handle in enumerate(handles):
             path = "seed (navigation)" if i == 0 else "replay (no page load)"
             try:

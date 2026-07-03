@@ -660,29 +660,52 @@ class BrowserSession:
                 return user
         return users[-1] if users else None
 
+    @staticmethod
+    def _owner_from_payloads(payloads: list[dict]) -> dict | None:
+        """The post owner (a user record: id, pk, username, is_private, full_name)
+        lifted from the first edge of a profile-posts response. Its presence also
+        proves the timeline is visible to us."""
+        for data in payloads:
+            if not isinstance(data, dict):
+                continue
+            conn = data.get("xdt_api__v1__feed__user_timeline_graphql_connection")
+            if not isinstance(conn, dict):
+                continue
+            for edge in conn.get("edges") or []:
+                node = edge.get("node") or {}
+                owner = node.get("user") or (node.get("media") or {}).get("user")
+                if owner:
+                    return owner
+        return None
+
+    @staticmethod
+    def _has_feed_connection(payloads: list[dict]) -> bool:
+        return any(
+            isinstance(d, dict)
+            and isinstance(d.get("xdt_api__v1__feed__user_timeline_graphql_connection"), dict)
+            for d in payloads
+        )
+
     async def _resolve_profile(self, handle: str) -> tuple[dict | None, str | None]:
-        """Resolve a handle to its profile record by *replaying* the captured
-        profile-info GraphQL query with the username swapped in — no page load.
+        """Resolve a handle to its profile record by *replaying* the captured,
+        username-keyed profile-posts query (PolarisProfilePostsQuery) with the
+        username swapped in — no page load.
 
         This deliberately avoids the bare web_profile_info REST endpoint (which
         Instagram 429s aggressively): a replayed GraphQL request reuses the seed
-        navigation's signed headers/tokens, so it looks like ordinary web-app
-        traffic (the same reason the timeline replay is accepted). Returns
-        (user, None) on success or (None, code) on an availability verdict; auth
-        / throttle responses raise so the worker can lock + rotate.
+        navigation's signed headers/tokens, so it reads as ordinary web-app
+        traffic (the same reason the timeline replay is accepted). The response's
+        first post carries the owner (id + is_private + username). Returns
+        (owner, None) when the timeline is visible, else (None, code); auth /
+        throttle responses raise so the worker can lock + rotate.
         """
         seed = self._profile_seed
         template = substitute_identity(
-            seed["template"],
-            seed["seed_username"],
-            None,
-            handle,
-            None,
+            seed["template"], seed["seed_username"], None, handle, None,
             reset_cursor=False,
         )
-        strategy = StaticStrategy()
         body = build_replay_body(
-            template, None, 0, strategy,
+            template, None, 0, StaticStrategy(),
             latest_form=self.response_interceptor.latest_request_form,
         )
         headers = merge_header_tokens(
@@ -695,24 +718,40 @@ class BrowserSession:
         payloads, errors = parse_response(text)
         if errors and errors_indicate_rate_limit(errors):
             raise RateLimitError("; ".join(str(e.get("message")) for e in errors))
-        user = None
-        for data in payloads:
-            if isinstance(data, dict) and data.get("user"):
-                user = data["user"]
-                break
-        if not user:
+
+        owner = self._owner_from_payloads(payloads)
+        if owner is None:
+            # Connection present but empty: the account exists yet exposes no
+            # posts to us (private-and-not-followed, or genuinely none). No
+            # connection at all: the handle doesn't resolve.
+            if self._has_feed_connection(payloads):
+                return None, "account is private"
             return None, "profile is not available"
-        self.response_interceptor.user_metadata_list.append(user)
-        return user, None
+
+        # Guard the handle→account resolution: IG occasionally maps a query to a
+        # different account. Never return another account's data under this
+        # handle.
+        if str(owner.get("username", "")).lower() != handle.lower():
+            logger.warning(
+                f"profile replay for @{handle} resolved to "
+                f"@{owner.get('username')}; treating as unavailable"
+            )
+            return None, "profile is not available"
+
+        self.response_interceptor.user_metadata_list.append(owner)
+        return owner, None
 
     def _classify_profile(self, user: dict) -> str | None:
         """Map a profile record to an availability code, or None if its timeline
-        is scrapeable. Private-and-not-followed / zero-post accounts short-circuit
-        before we seed or replay anything."""
-        if user.get("is_private") and not user.get("followed_by_viewer"):
+        is scrapeable. Safe on both record shapes: the rich record captured on a
+        seed navigation carries `followed_by_viewer` + `edge_owner_to_timeline_media`,
+        while an owner lifted from a replayed post carries neither — and its very
+        presence already proves the timeline is visible, so a missing field means
+        'scrapeable', not 'private'."""
+        if user.get("is_private") and user.get("followed_by_viewer") is False:
             return "account is private"
-        media = user.get("edge_owner_to_timeline_media") or {}
-        if media.get("count") == 0:
+        media = user.get("edge_owner_to_timeline_media")
+        if isinstance(media, dict) and media.get("count") == 0:
             return "no posts"
         return None
 
@@ -720,15 +759,16 @@ class BrowserSession:
         self, handle: str, want_timeline: bool
     ) -> tuple[dict | None, bool]:
         """Navigate a profile once to harvest live signed templates — the
-        one-per-session lazy seed. The page load fires the profile-info query
-        (cached as `_profile_seed`); when `want_timeline`, a bootstrap scroll also
-        provokes the paginating profile-posts query (cached as `_timeline_seed`,
-        best-effort — a private / zero-post profile never fires it).
+        one-per-session lazy seed. The page load fires the username-keyed
+        profile-posts query (cached as `_profile_seed`, the resolver); when
+        `want_timeline`, a bootstrap scroll also provokes the paginating query
+        (cached as `_timeline_seed`, best-effort — a private / zero-post profile
+        never fires it).
 
-        Returns (user, nav_ok): `user` is the profile record captured on load
-        (None if the handle doesn't exist); `nav_ok` is False only when the
-        navigation itself failed (timeout), so the caller can distinguish a
-        missing profile from a transient, retryable error."""
+        Returns (user, nav_ok): `user` is the rich profile record captured
+        passively on load (None if the handle doesn't exist); `nav_ok` is False
+        only when the navigation itself failed (timeout), so the caller can
+        distinguish a missing profile from a transient, retryable error."""
         target_url = f"{BASE_URL}{handle}/"
         try:
             await self._goto(target_url)
@@ -737,7 +777,7 @@ class BrowserSession:
         await self._wait_for_first_post()
 
         profile_tmpl = await self._wait_for_template(
-            "profile", timeout=15.0, require_cursor=False
+            "profile_posts", timeout=15.0, require_cursor=False
         )
         user = self._passive_user(handle)
         if profile_tmpl is not None and self._profile_seed is None:
@@ -763,10 +803,12 @@ class BrowserSession:
         self, handle: str, want_timeline: bool
     ) -> tuple[dict | None, str | None]:
         """Resolve a handle to its profile record, seeding the query template on
-        first use. Replays the cached profile-info query when possible (no page
+        first use. Replays the cached profile-posts query when possible (no page
         load); otherwise lazily seeds it (and, when `want_timeline`, the
-        paginating template) via one navigation. Returns (user, None) or
-        (None, availability_code)."""
+        paginating template) via one navigation. Returns (user, None) when a
+        usable record was obtained, else (None, availability_code). Availability
+        of a record we DID obtain (private / no posts) is left to the caller via
+        _classify_profile."""
         if self._profile_seed is None:
             user, nav_ok = await self._seed_via_navigation(handle, want_timeline)
             if not nav_ok:
@@ -869,7 +911,7 @@ class BrowserSession:
                 seed["seed_username"],
                 seed["seed_user_id"],
                 handle,
-                str(user.get("id")),
+                str(user.get("id") or user.get("pk")),
             )
 
         params = {
