@@ -20,6 +20,7 @@ from igscrape.pagination import (
     parse_form,
     parse_response,
     select_cursor_strategy,
+    substitute_identity,
 )
 
 
@@ -165,3 +166,42 @@ def test_v1_strategy_max_id():
 def test_select_cursor_strategy():
     assert select_cursor_strategy(_graphql_template()).name == "graphql"
     assert select_cursor_strategy({"form": {"max_id": "5"}, "variables": {}}).name == "v1_max_id"
+
+
+def test_substitute_identity_username_keyed_resets_cursor_and_form():
+    variables = {"after": "SEED_CURSOR", "username": "seed", "first": 12}
+    template = {
+        "variables": dict(variables),
+        "form": {"doc_id": "1", "variables": json.dumps(variables)},
+        "_has_cursor": True,
+    }
+    out = substitute_identity(template, "seed", "111", "target", "222")
+    assert out["variables"]["username"] == "target"
+    assert out["variables"]["after"] is None          # cursor reset to page 1
+    assert out["_has_cursor"] is False
+    # form's variables blob re-dumped to match the swapped identity
+    form_vars = json.loads(out["form"]["variables"])
+    assert form_vars["username"] == "target"
+    assert form_vars["after"] is None
+    # original template is left untouched (deep copy)
+    assert template["variables"]["username"] == "seed"
+    assert template["variables"]["after"] == "SEED_CURSOR"
+
+
+def test_substitute_identity_id_keyed_nested():
+    template = {
+        "variables": {"after": None, "data": {"count": 12, "user_id": "111"}, "id": "111"},
+        "form": {},
+    }
+    out = substitute_identity(template, "seed", "111", "target", "222")
+    assert out["variables"]["id"] == "222"
+    assert out["variables"]["data"]["user_id"] == "222"
+    assert out["variables"]["data"]["count"] == 12     # non-identity ints untouched
+
+
+def test_substitute_identity_drops_before_and_last():
+    template = {"variables": {"after": "C", "before": "B", "last": 5, "id": "111"}, "form": {}}
+    out = substitute_identity(template, "seed", "111", "t", "222")
+    assert out["variables"]["after"] is None
+    assert "before" not in out["variables"]
+    assert "last" not in out["variables"]

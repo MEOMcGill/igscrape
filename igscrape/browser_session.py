@@ -5,7 +5,9 @@ termination conditions.
 """
 
 import asyncio
+import copy
 import inspect
+import json
 import random
 import re
 from datetime import datetime, timezone
@@ -39,6 +41,7 @@ from .pagination import (
     merge_header_tokens,
     parse_response,
     select_cursor_strategy,
+    substitute_identity,
 )
 from .parsers import get_post_timestamp, post_flattener
 from .response import InstagramResponseInterceptor
@@ -46,6 +49,10 @@ from .stop_conditions import StopState, assemble_default_stop_conditions
 from .utils import get_device_os
 
 BASE_URL = "https://www.instagram.com/"
+
+# The public web app-id every instagram.com XHR carries; web_profile_info
+# rejects requests without it. Stable (not a rotating token).
+IG_APP_ID = "936619743392459"
 
 # Replay tuning. FINGERPRINT_EVERY: emit a small organic scroll burst every N
 # replays so the session still produces human-like page activity.
@@ -107,6 +114,13 @@ class BrowserSession:
         self._context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
         self.response_interceptor: Optional[InstagramResponseInterceptor] = None
+
+        # Session-level timeline template, harvested once (lazy-seed) from the
+        # first handle's navigation and re-pointed at later handles via
+        # substitute_identity — so every handle after the first is browserless.
+        # Survives interceptor.flush() (which is per-scrape). Shape:
+        # {"template": <captured>, "seed_username": str, "seed_user_id": str}.
+        self._timeline_seed: Optional[dict] = None
 
     async def __aenter__(self):
         await self.initialize()
@@ -633,37 +647,82 @@ class BrowserSession:
             await asyncio.sleep(poll)
         logger.warning(f"no post anchor rendered within {timeout:.0f}s")
 
-    async def _failed_to_load_gate(self, handle: str) -> bool:
-        """The 'Failed to Load / Retry' popup (post_scraper.py:173-187)."""
-        return await self._failed_to_load_gate_url(f"{BASE_URL}{handle}/")
+    # ==================== Profile lookup via API ====================
 
-    async def _failed_to_load_gate_url(self, url: str) -> bool:
-        """As _failed_to_load_gate, but gated on an arbitrary target URL."""
-        try:
-            if await self.page.get_by_role("button", name="Retry").count() > 0:
-                if await self.page.get_by_text("Failed to Load").count() > 0:
-                    # Only treat as gate if we're actually on the target page —
-                    # retry popups from previous pages can linger.
-                    return self.page.url == url
-        except Exception:
-            pass
-        return False
+    async def _fetch_profile_api(
+        self, handle: str
+    ) -> tuple[dict | None, str | None]:
+        """Resolve a handle to its profile record via the web_profile_info API.
 
-    def _intercepted_is_private(self, handle: str) -> bool:
-        """Whether the intercepted profile response marks this handle private.
-
-        The profile GraphQL response (data['user']) carries the authoritative
-        is_private flag. Only consulted in the no-posts-visible / load-failure
-        branches below, so a private account we *follow* (which returns posts
-        normally and never reaches those branches) isn't affected — no need to
-        also check viewer-follow state.
+        A single authenticated GET — no page navigation. The browser context's
+        cookies ride along automatically; we only add the stable app-id header
+        plus the freshest volatile tokens (csrf / www-claim) harvested from
+        earlier traffic. Returns (user, None) on success, (None, code) on a
+        definitive availability verdict; auth / throttle responses raise so the
+        worker can lock + rotate the account.
         """
-        for user in self.response_interceptor.user_metadata_list:
-            if user.get("username", "").lower() == handle.lower() and user.get(
-                "is_private"
-            ):
-                return True
-        return False
+        url = f"{BASE_URL}api/v1/users/web_profile_info/?username={quote(handle)}"
+        headers = merge_header_tokens(
+            {"x-ig-app-id": IG_APP_ID},
+            self.response_interceptor.latest_request_headers,
+        )
+        for attempt in range(3):
+            try:
+                resp = await self.page.request.get(
+                    url, headers=headers, timeout=REPLAY_TIMEOUT_MS
+                )
+            except Exception as e:
+                return None, f"request error: {e}"
+
+            status = resp.status
+            if status == 200:
+                text = await resp.text()
+                if text.lstrip().startswith("<"):
+                    raise FailedLoginError("web_profile_info returned HTML (login bounce)")
+                try:
+                    payload = json.loads(text)
+                except Exception:
+                    return None, "response_shape_error"
+                user = (payload.get("data") or {}).get("user")
+                if not user:
+                    return None, "profile is not available"
+                return user, None
+            if status == 404:
+                return None, "profile is not available"
+            if status in (401, 403):
+                raise FailedLoginError(f"web_profile_info status {status}")
+            if status == 429:
+                raise RateLimitError("web_profile_info status 429")
+            if 500 <= status < 600:
+                await asyncio.sleep(2 * (attempt + 1))
+                continue
+            return None, f"web_profile_info status {status}"
+        return None, "timeout error"
+
+    def _classify_profile(self, user: dict) -> str | None:
+        """Map a profile record to an availability code, or None if its timeline
+        is scrapeable. Private-and-not-followed / zero-post accounts short-circuit
+        before we seed or replay anything."""
+        if user.get("is_private") and not user.get("followed_by_viewer"):
+            return "account is private"
+        media = user.get("edge_owner_to_timeline_media") or {}
+        if media.get("count") == 0:
+            return "no posts"
+        return None
+
+    async def _seed_timeline_template(self, handle: str) -> dict | None:
+        """Navigate a profile once to harvest a live signed timeline template —
+        the one-per-session lazy seed. Availability is already settled via the
+        API, so this only loads the grid and captures the paginating request
+        (a bootstrap scroll provokes it). Returns None if the template never
+        materializes (e.g. navigation timeout)."""
+        target_url = f"{BASE_URL}{handle}/"
+        try:
+            await self._goto(target_url)
+        except PWTimeoutError:
+            return None
+        await self._wait_for_first_post()
+        return await self._wait_for_template("user_timeline", timeout=30.0)
 
     # ==================== Scraping: user_timeline ====================
 
@@ -677,12 +736,16 @@ class BrowserSession:
         video_dir: str | Path | None = None,
         jsonl_path: str | Path | None = None,
     ) -> ScrapingResult:
-        """Collect a user's timeline via capture-once-then-replay.
+        """Collect a user's timeline via API profile resolution + capture-replay.
 
-        Navigates to the profile, captures the feed GraphQL request once, then
-        replays it with an advancing cursor (no continuous scrolling). Stops on
-        the start date, end-of-feed, or a safety cap (see stop_conditions).
-        Result codes follow the result-code taxonomy.
+        Resolves the handle to its numeric id + availability with a single
+        web_profile_info API call (no page load), then collects by replaying the
+        profile-posts GraphQL request with an advancing cursor. The signed
+        request template is harvested once per session (a lazy seed navigation on
+        the first scrapeable handle) and re-pointed at every later handle via
+        substitute_identity, so all but the first handle are fully browserless.
+        Stops on the start date, end-of-feed, or a safety cap (see
+        stop_conditions). Result codes follow the result-code taxonomy.
 
         Streaming options (fired with each batch of newly-collected raw post
         nodes as each replayed page arrives; they compose — any combination of
@@ -725,41 +788,39 @@ class BrowserSession:
         start_dt = datetime.strptime(start_date, "%Y-%m-%d")
         start_unix = int(start_dt.timestamp())
 
-        target_url = f"{BASE_URL}{handle}/"
-        try:
-            await self._goto(target_url)
-        except PWTimeoutError:
-            return _result("timeout error")
-        # Poll for the profile grid to render rather than a fixed wait (main's
-        # f9b8f5b); the replay path still needs the first page loaded to harvest
-        # the feed template.
-        await self._wait_for_first_post()
+        # Resolve the target via the API — numeric id + availability, no page
+        # load. Availability verdicts (not found / private / no posts) short-
+        # circuit here instead of via DOM-text gates.
+        user, code = await self._fetch_profile_api(handle)
+        if user is None:
+            return _result(code or "profile is not available")
+        self.response_interceptor.user_metadata_list.append(user)
+        code = self._classify_profile(user)
+        if code is not None:
+            return _result(code)
+        user_id = user.get("id")
 
-        # Availability / access gates before we commit to replaying.
-        if await self.page.get_by_text("Profile isn't available").count() > 0:
-            return _result("profile is not available")
-        if await self.page.get_by_text("Sorry, this page isn't available").count() > 0:
-            return _result("no posts")
-        if (
-            await self.page.get_by_text("This account is private").count() > 0
-            or await self.page.get_by_text("account is private").count() > 0
-        ):
-            return _result("account is private")
-        if await self._failed_to_load_gate(handle):
-            return _result("failed to load")
-
-        # Capture the feed request template (a bootstrap scroll provokes it),
-        # then collect by replaying it directly — no further scrolling.
-        template = await self._wait_for_template("user_timeline", timeout=30.0)
-        if template is None:
-            # A private account we don't follow renders no grid and fires no
-            # feed request, so template capture times out. Classify it
-            # authoritatively (main's beea38b) before reporting a generic error.
-            if self._intercepted_is_private(handle):
-                return _result("account is private")
-            if await self.page.get_by_text("No Posts Yet").count() > 0:
-                return _result("no posts")
-            return _result("timeout error")
+        # Obtain a replayable template. The first scrapeable handle of a session
+        # lazily seeds it via one profile navigation; every later handle re-points
+        # the cached seed at its own id (substitute_identity) — no page load.
+        if self._timeline_seed is None:
+            template = await self._seed_timeline_template(handle)
+            if template is None:
+                return _result("timeout error")
+            self._timeline_seed = {
+                "template": copy.deepcopy(template),
+                "seed_username": handle,
+                "seed_user_id": str(user_id),
+            }
+        else:
+            seed = self._timeline_seed
+            template = substitute_identity(
+                seed["template"],
+                seed["seed_username"],
+                seed["seed_user_id"],
+                handle,
+                str(user_id),
+            )
 
         params = {
             "max_posts": -1,
@@ -788,7 +849,8 @@ class BrowserSession:
     # ==================== Scraping: user_profile ====================
 
     async def user_profile(self, handle: str) -> ScrapingResult:
-        """Single-shot profile lookup — capture the first `user` XHR response."""
+        """Single-shot profile lookup via the web_profile_info API — one
+        authenticated GET, no page navigation."""
         self.endpoint = "UserProfile"
         self.response_interceptor.flush()
         start_time = datetime.now(timezone.utc)
@@ -804,26 +866,11 @@ class BrowserSession:
                 time_taken=datetime.now(timezone.utc) - start_time,
             )
 
-        target = f"{BASE_URL}{handle}/"
-        try:
-            await self._goto(target)
-        except PWTimeoutError:
-            return _result("timeout error")
-        await asyncio.sleep(5)
-
-        if self.page.url != target:
-            return _result("logged out while scraping")
-
-        if await self.page.get_by_text("Profile isn't available").count() > 0:
-            return _result("profile is not available")
-
-        # Wait a bit for user XHR to arrive
-        for _ in range(20):
-            if self.response_interceptor.user_metadata_list:
-                return _result("success")
-            await asyncio.sleep(0.5)
-
-        return _result("timeout error")
+        user, code = await self._fetch_profile_api(handle)
+        if user is None:
+            return _result(code or "profile is not available")
+        self.response_interceptor.user_metadata_list.append(user)
+        return _result("success")
 
     # ==================== Scraping: post_by_shortcode ====================
 
