@@ -21,8 +21,11 @@ from playwright.async_api import Page, Request, Response
 
 from .logger import logger
 
-# Match without trailing slash: the live GraphQL endpoint is posted to as
-# `/api/graphql` (no trailing slash), so prefixes must not require one.
+# NB: no trailing slash on /api/graphql — the profile-info GraphQL response
+# (data['user'], which carries the user record + is_private) is served from
+# exactly "https://www.instagram.com/api/graphql" with no trailing slash, so a
+# trailing slash here silently dropped every profile/user response (empty
+# users output + no is_private to classify private accounts on).
 API_DIRECTORIES = (
     "https://www.instagram.com/api/graphql",
     "https://www.instagram.com/api/v1",

@@ -7,6 +7,7 @@ termination conditions.
 import asyncio
 import inspect
 import random
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
@@ -50,6 +51,18 @@ BASE_URL = "https://www.instagram.com/"
 # replays so the session still produces human-like page activity.
 REPLAY_TIMEOUT_MS = 30000
 FINGERPRINT_EVERY = 50
+
+# Post/reel anchor detection for the grid-render poll (_wait_for_first_post).
+# Matches /<user>/p/<code>/ and /<user>/reel/<code>/ (main's f9b8f5b).
+_POST_HREF_RE = re.compile(r"^/[A-Za-z0-9_.-]+/(?:p|reel)/[A-Za-z0-9_.-]+/?$")
+
+
+def _is_post_href(href: str | None) -> bool:
+    if not href:
+        return False
+    if href.startswith("/p/") or href.startswith("/reel/"):
+        return True
+    return _POST_HREF_RE.match(href) is not None
 
 
 def _combine_post_hooks(hooks: list) -> Callable | None:
@@ -576,6 +589,50 @@ class BrowserSession:
                 await self._fingerprint_scroll_burst()
             await asyncio.sleep(random.uniform(0.5, 1.5))
 
+    async def _find_lowest_post(self) -> Locator | None:
+        """Return the bottom-most post/reel anchor on the page,
+        or None if none visible. Ports post_scraper.py:429-454."""
+        anchors = self.page.locator("a")
+        count = await anchors.count()
+        for i in range(count):
+            j = count - 1 - i
+            elt = anchors.nth(j)
+            try:
+                href = await elt.get_attribute("href")
+            except Exception:
+                continue
+            if _is_post_href(href):
+                return elt
+        return None
+
+    async def _wait_for_first_post(self, timeout: float = 25.0, poll: float = 1.0) -> None:
+        """Wait for the profile's post grid to render before snapshotting it.
+
+        Instagram populates the grid asynchronously after ``domcontentloaded``,
+        so a fixed short sleep followed by a single ``_find_lowest_post()``
+        snapshot spuriously returns "timeout error" whenever the grid is slow to
+        load (common over a VPN or on heavy profiles). Poll until a post anchor
+        appears, a terminal empty/error state is shown, or ``timeout`` elapses —
+        then let the caller's normal logic take its snapshot.
+        """
+        empty_state_texts = (
+            "Profile isn't available",
+            "Sorry, this page isn't available",
+            "No Posts Yet",
+            "This account is private",
+        )
+        for _ in range(max(1, int(timeout / poll))):
+            for text in empty_state_texts:
+                if await self.page.get_by_text(text).count() > 0:
+                    return
+            try:
+                if await self._find_lowest_post() is not None:
+                    return
+            except Exception:
+                pass
+            await asyncio.sleep(poll)
+        logger.warning(f"no post anchor rendered within {timeout:.0f}s")
+
     async def _failed_to_load_gate(self, handle: str) -> bool:
         """The 'Failed to Load / Retry' popup (post_scraper.py:173-187)."""
         return await self._failed_to_load_gate_url(f"{BASE_URL}{handle}/")
@@ -590,6 +647,22 @@ class BrowserSession:
                     return self.page.url == url
         except Exception:
             pass
+        return False
+
+    def _intercepted_is_private(self, handle: str) -> bool:
+        """Whether the intercepted profile response marks this handle private.
+
+        The profile GraphQL response (data['user']) carries the authoritative
+        is_private flag. Only consulted in the no-posts-visible / load-failure
+        branches below, so a private account we *follow* (which returns posts
+        normally and never reaches those branches) isn't affected — no need to
+        also check viewer-follow state.
+        """
+        for user in self.response_interceptor.user_metadata_list:
+            if user.get("username", "").lower() == handle.lower() and user.get(
+                "is_private"
+            ):
+                return True
         return False
 
     # ==================== Scraping: user_timeline ====================
@@ -657,7 +730,10 @@ class BrowserSession:
             await self._goto(target_url)
         except PWTimeoutError:
             return _result("timeout error")
-        await asyncio.sleep(5)
+        # Poll for the profile grid to render rather than a fixed wait (main's
+        # f9b8f5b); the replay path still needs the first page loaded to harvest
+        # the feed template.
+        await self._wait_for_first_post()
 
         # Availability / access gates before we commit to replaying.
         if await self.page.get_by_text("Profile isn't available").count() > 0:
@@ -676,6 +752,11 @@ class BrowserSession:
         # then collect by replaying it directly — no further scrolling.
         template = await self._wait_for_template("user_timeline", timeout=30.0)
         if template is None:
+            # A private account we don't follow renders no grid and fires no
+            # feed request, so template capture times out. Classify it
+            # authoritatively (main's beea38b) before reporting a generic error.
+            if self._intercepted_is_private(handle):
+                return _result("account is private")
             if await self.page.get_by_text("No Posts Yet").count() > 0:
                 return _result("no posts")
             return _result("timeout error")
