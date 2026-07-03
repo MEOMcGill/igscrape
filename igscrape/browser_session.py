@@ -746,6 +746,12 @@ class BrowserSession:
         ):
             return _result("account is private")
         if await self._failed_to_load_gate(handle):
+            # A private account we don't follow can render a Retry / "Failed to
+            # Load" tile (and modern IG omits the "This account is private"
+            # text), so classify it authoritatively before treating the gate as
+            # a rate-limit (restores beea38b — regressed by the reset).
+            if self._intercepted_is_private(handle):
+                return _result("account is private")
             return _result("failed to load")
 
         # Capture the feed request template (a bootstrap scroll provokes it),
