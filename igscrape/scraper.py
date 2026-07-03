@@ -62,14 +62,17 @@ class InstagramScraper:
         on_new_posts: Callable[[list[dict]], None | Awaitable[None]] | None = None,
         download_videos: bool = False,
         video_dir: str | Path | None = None,
+        jsonl_path: str | Path | None = None,
     ) -> ScrapingResult:
         """Scrape a user's timeline.
 
-        By default just returns a ScrapingResult. Optionally, while scrolling:
-          - on_new_posts(batch): called with each batch of newly-intercepted
-            raw post nodes (not flattened). Overrides the built-in hook.
-          - download_videos=True + video_dir: download every mp4 to video_dir
-            as posts arrive (ignored if on_new_posts is given).
+        By default just returns a ScrapingResult. Optionally, as each replayed
+        page arrives (these compose — any combination runs):
+          - jsonl_path: append each raw post node as one JSON line to this file
+            (opt-in streaming sink; the returned ScrapingResult is unchanged).
+          - download_videos=True + video_dir: download every mp4 to video_dir.
+          - on_new_posts(batch): called with each batch of newly-collected raw
+            post nodes (not flattened).
         """
         return await self._submit(
             Query(
@@ -84,6 +87,7 @@ class InstagramScraper:
                     "on_new_posts": on_new_posts,
                     "download_videos": download_videos,
                     "video_dir": video_dir,
+                    "jsonl_path": jsonl_path,
                 },
             )
         )
@@ -114,14 +118,16 @@ class InstagramScraper:
         on_new_posts: Callable[[list[dict]], None | Awaitable[None]] | None = None,
         download_videos: bool = False,
         video_dir: str | Path | None = None,
+        jsonl_path: str | Path | None = None,
     ) -> ScrapingResult:
         """Collect posts from Instagram's keyword search (the SERP at
         /explore/search/keyword/?q=<keyword>).
 
-        Scrolls until `max_posts` posts are collected or the results stop
-        yielding anything new. Search results are not reliably chronological, so
-        there is no date cutoff. Streaming options (on_new_posts / download_videos
-        + video_dir) behave exactly as in user_timeline.
+        Replays the SERP request until `max_posts` posts are collected or the
+        results stop yielding anything new. Search results are not reliably
+        chronological, so there is no date cutoff. Streaming options (jsonl_path
+        / on_new_posts / download_videos + video_dir) behave exactly as in
+        user_timeline.
         """
         return await self._submit(
             Query(
@@ -132,6 +138,7 @@ class InstagramScraper:
                     "on_new_posts": on_new_posts,
                     "download_videos": download_videos,
                     "video_dir": video_dir,
+                    "jsonl_path": jsonl_path,
                 },
             )
         )

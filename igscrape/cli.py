@@ -18,7 +18,7 @@ from tabulate import tabulate
 
 from .accounts_pool import AccountsPool
 from .downloaders import download_images_from_posts, download_videos_from_posts
-from .exporter import export_posts
+from .exporter import export_posts, flatten_paths
 from .logger import set_log_level
 from .utils import gather, get_home_dir_path
 
@@ -745,11 +745,60 @@ def download_videos(input_file, out_dir, concurrency, merge, keep_streams):
     help="Output file (.csv or .parquet — format inferred from extension)",
 )
 def export_posts_cmd(input_file, output):
-    """Flatten a scraped JSON into a tidy CSV or Parquet of posts."""
+    """Flatten a scraped JSON into a tidy CSV or Parquet of posts.
+
+    Kept for backwards compatibility; `flatten` is the more capable command
+    (directories, .jsonl inputs, JSONL output, --concat, --format all).
+    """
     if not os.path.exists(input_file):
         raise click.UsageError(f"File not found: {input_file}")
     n = export_posts(input_file, output)
     click.echo(f"Wrote {n} rows to {output}")
+
+
+@cli.command()
+@click.argument("input_path")
+@click.option(
+    "--output",
+    "-o",
+    default=None,
+    help="Output path. A file (single named output) or a folder (per-file "
+    "outputs land inside). Heuristic: existing dir or trailing '/' → folder; "
+    ".csv/.jsonl/.parquet suffix → file; otherwise → folder (created if absent). "
+    "Omit to write alongside the input(s).",
+)
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["csv", "jsonl", "parquet", "all"]),
+    default="csv",
+    help="Output format (default csv). 'all' writes csv + jsonl + parquet.",
+)
+@click.option(
+    "--concat",
+    is_flag=True,
+    help="Concatenate a directory of inputs into a single output file "
+    "(requires --output to be a file path).",
+)
+def flatten(input_path, output, fmt, concat):
+    """Flatten scraped posts (a file OR a directory of them) into a dataset.
+
+    \b
+    Accepts .json / .json.gz (a ScrapingResult, a bare list, or one post) and
+    .jsonl / .ndjson (.gz) — including the streamed sink files. Uses the tidy
+    row-per-post schema from exporter.flatten_post.
+
+    \b
+    Examples:
+      igscrape flatten data/foo_Search.json
+      igscrape flatten data/foo_Search.jsonl --format all
+      igscrape flatten data-instagram/ --output flat/ --format parquet
+      igscrape flatten data-instagram/ --output merged.parquet --concat
+    """
+    if not os.path.exists(input_path):
+        raise click.UsageError(f"Path not found: {input_path}")
+    n = flatten_paths(input_path, output=output, fmt=fmt, concat=concat)
+    click.echo(f"Wrote {n} rows" + (f" ({fmt})" if fmt != "csv" else ""))
 
 
 def main():
