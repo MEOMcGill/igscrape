@@ -200,17 +200,18 @@ class InstagramResponseInterceptor:
         keys = data.keys()
         is_feed = any(k in keys for k in FEED_DATA_KEYS)
 
-        # The username-keyed profile-posts query (PolarisProfilePostsQuery)
-        # resolves a handle -> owner id + first page. Capture it separately as the
-        # profile resolver: it is replayed with the username swapped in, a signed
-        # GraphQL request that (unlike the 429-prone web_profile_info REST call)
-        # reads as ordinary web-app traffic. It never doubles as the paginating
-        # template below — that one is cursor/id-keyed and carries no username.
-        if is_feed and variables.get("username"):
-            self._store_template("profile_posts", request, headers, form, variables)
-            return
-
         if is_feed:
+            # The profile-posts queries (first page + pagination) are the only
+            # feed responses that carry a `username` in their variables; the
+            # logged-in home feed (PolarisFeedTimelineRootV2Query, variant=home)
+            # does not. Require a username so the home feed can never pollute the
+            # profile-timeline template. Both profile queries are username-keyed,
+            # so a handle is re-targeted by swapping the username alone — the
+            # numeric user id is never needed. The cursor-bearing paginating query
+            # is preferred (see below) and doubles as the profile resolver: with
+            # `after=null` it returns page 1 (owner + first posts).
+            if not variables.get("username"):
+                return
             label = "user_timeline"
         elif any(k in keys for k in SEARCH_DATA_KEYS):
             label = "search"
@@ -218,10 +219,10 @@ class InstagramResponseInterceptor:
             return
 
         # Instagram uses a SEPARATE query for pagination than for the first page
-        # (e.g. PolarisKeywordSearchExplorePageRelayQuery vs ...PaginationQuery):
-        # only the paginating one carries a cursor (`after` / `max_id`) and the
-        # doc_id we must replay. Prefer the cursor-bearing template; never let an
-        # initial-page request clobber a paginating one already captured.
+        # (profile: PolarisProfilePostsQuery vs PolarisProfilePostsTabContentQuery
+        # _connection): only the paginating one carries a cursor (`after` /
+        # `max_id`) and the doc_id we must replay. Prefer the cursor-bearing
+        # template; never let an initial-page request clobber a paginating one.
         has_cursor = bool(variables.get("after")) or bool(form.get("max_id"))
         existing = self.templates.get(label)
         if existing is not None and existing.get("_has_cursor") and not has_cursor:
