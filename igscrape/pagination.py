@@ -140,39 +140,45 @@ def _swap_in_place(obj, replacements: dict[str, str]) -> None:
 def substitute_identity(
     template: dict,
     seed_username: str,
-    seed_user_id: str | int,
+    seed_user_id: str | int | None,
     new_username: str,
-    new_user_id: str | int,
+    new_user_id: str | int | None,
+    reset_cursor: bool = True,
 ) -> dict:
-    """Re-target a captured timeline template at a different handle.
+    """Re-target a captured template at a different handle.
 
     The captured request bakes the seed handle's identity into its `variables`
     (Instagram keys the profile-posts connection off either the username or the
     numeric user id, depending on the query), so we deep-copy the template and
-    swap the seed handle's username *and* id for the new handle's wherever they
-    appear. This is the "substitute" half of lazy-seed-plus-substitute: harvest a
-    real signed template once, then re-point it per handle without a page load.
+    swap the seed handle's username — and its id when both ids are supplied — for
+    the new handle's wherever they appear. This is the "substitute" half of
+    lazy-seed-plus-substitute: harvest a real signed template once, then re-point
+    it per handle without a page load.
 
-    We also reset the Relay cursor: the seed template is the *paginating* request
-    (`_has_cursor=True`), so its `after` is the seed's mid-feed cursor — a fresh
-    handle must start at page 1. `form["variables"]` is re-dumped so a caller
+    `reset_cursor` (default True, for the paginating timeline template) also
+    clears the Relay cursor: the seed template is the paginating request
+    (`_has_cursor=True`), so its `after` is the seed's mid-feed cursor and a fresh
+    handle must start at page 1. Pass False for the cursor-less profile-info query
+    (keyed by username only, `new_user_id=None`), where adding an `after` key
+    would corrupt the request. `form["variables"]` is re-dumped so a caller
     reading the raw form (rather than the parsed `variables`) stays consistent.
     """
     new = copy.deepcopy(template)
-    replacements = {
-        str(seed_username): str(new_username),
-        str(seed_user_id): str(new_user_id),
-    }
+    replacements = {str(seed_username): str(new_username)}
+    if seed_user_id is not None and new_user_id is not None:
+        replacements[str(seed_user_id)] = str(new_user_id)
     variables = new.get("variables") or {}
     _swap_in_place(variables, replacements)
-    # Start at page 1 — drop any cursor baked into the paginating template.
-    variables["after"] = None
-    variables.pop("before", None)
-    variables.pop("last", None)
+    if reset_cursor:
+        # Start at page 1 — drop any cursor baked into the paginating template.
+        variables["after"] = None
+        variables.pop("before", None)
+        variables.pop("last", None)
     new["variables"] = variables
     if isinstance(new.get("form"), dict) and "variables" in new["form"]:
         new["form"]["variables"] = json.dumps(variables, separators=(",", ":"))
-    new["_has_cursor"] = False
+    if reset_cursor:
+        new["_has_cursor"] = False
     return new
 
 
@@ -300,6 +306,22 @@ class GraphQLCursorStrategy(CursorStrategy):
 
     def extract(self, payloads):
         return find_page_info(payloads)
+
+
+class StaticStrategy(CursorStrategy):
+    """No pagination — replay the captured request verbatim.
+
+    Used for the single-shot profile-info query: build_replay_body still re-dumps
+    `variables` and refreshes rotating tokens, but the request is not advanced.
+    """
+
+    name = "static"
+
+    def apply_cursor(self, form, variables, cursor, count):
+        return
+
+    def extract(self, payloads):
+        return None, False
 
 
 class V1MaxIdStrategy(CursorStrategy):

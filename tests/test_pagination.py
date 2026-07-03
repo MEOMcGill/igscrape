@@ -205,3 +205,18 @@ def test_substitute_identity_drops_before_and_last():
     assert out["variables"]["after"] is None
     assert "before" not in out["variables"]
     assert "last" not in out["variables"]
+
+
+def test_substitute_identity_profile_mode_username_only_no_cursor():
+    # Profile-info query: keyed by username only, no cursor. reset_cursor=False
+    # must NOT inject an `after` key (that would corrupt the request), and with
+    # new_user_id=None the id is left untouched.
+    variables = {"username": "seed", "render_surface": "PROFILE"}
+    template = {
+        "variables": dict(variables),
+        "form": {"doc_id": "9", "variables": json.dumps(variables)},
+    }
+    out = substitute_identity(template, "seed", None, "target", None, reset_cursor=False)
+    assert out["variables"]["username"] == "target"
+    assert "after" not in out["variables"]
+    assert json.loads(out["form"]["variables"])["username"] == "target"

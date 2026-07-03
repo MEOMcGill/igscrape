@@ -7,7 +7,6 @@ termination conditions.
 import asyncio
 import copy
 import inspect
-import json
 import random
 import re
 from datetime import datetime, timezone
@@ -36,6 +35,7 @@ from .logger import logger
 from .models import Query, ScrapingResult
 from .pagination import (
     DEFAULT_PAGE_COUNT,
+    StaticStrategy,
     build_replay_body,
     errors_indicate_rate_limit,
     merge_header_tokens,
@@ -49,10 +49,6 @@ from .stop_conditions import StopState, assemble_default_stop_conditions
 from .utils import get_device_os
 
 BASE_URL = "https://www.instagram.com/"
-
-# The public web app-id every instagram.com XHR carries; web_profile_info
-# rejects requests without it. Stable (not a rotating token).
-IG_APP_ID = "936619743392459"
 
 # Replay tuning. FINGERPRINT_EVERY: emit a small organic scroll burst every N
 # replays so the session still produces human-like page activity.
@@ -115,11 +111,16 @@ class BrowserSession:
         self.page: Optional[Page] = None
         self.response_interceptor: Optional[InstagramResponseInterceptor] = None
 
-        # Session-level timeline template, harvested once (lazy-seed) from the
-        # first handle's navigation and re-pointed at later handles via
+        # Session-level replay seeds, harvested once (lazy-seed) from the first
+        # handle's navigation and re-pointed at later handles via
         # substitute_identity — so every handle after the first is browserless.
-        # Survives interceptor.flush() (which is per-scrape). Shape:
-        # {"template": <captured>, "seed_username": str, "seed_user_id": str}.
+        # Both survive interceptor.flush() (which is per-scrape).
+        #   _profile_seed:  {"template", "seed_username"} — the profile-info
+        #                   GraphQL query, replayed to resolve id + availability
+        #                   (used instead of the 429-prone web_profile_info REST).
+        #   _timeline_seed: {"template", "seed_username", "seed_user_id"} — the
+        #                   paginating profile-posts query.
+        self._profile_seed: Optional[dict] = None
         self._timeline_seed: Optional[dict] = None
 
     async def __aenter__(self):
@@ -647,57 +648,62 @@ class BrowserSession:
             await asyncio.sleep(poll)
         logger.warning(f"no post anchor rendered within {timeout:.0f}s")
 
-    # ==================== Profile lookup via API ====================
+    # ==================== Profile lookup via GraphQL replay ====================
 
-    async def _fetch_profile_api(
-        self, handle: str
-    ) -> tuple[dict | None, str | None]:
-        """Resolve a handle to its profile record via the web_profile_info API.
+    def _passive_user(self, handle: str) -> dict | None:
+        """The profile record captured passively during a seed navigation — the
+        `data['user']` the profile-info query fired on page load. Prefer an exact
+        username match; fall back to the most recent user seen."""
+        users = self.response_interceptor.user_metadata_list
+        for user in reversed(users):
+            if str(user.get("username", "")).lower() == handle.lower():
+                return user
+        return users[-1] if users else None
 
-        A single authenticated GET — no page navigation. The browser context's
-        cookies ride along automatically; we only add the stable app-id header
-        plus the freshest volatile tokens (csrf / www-claim) harvested from
-        earlier traffic. Returns (user, None) on success, (None, code) on a
-        definitive availability verdict; auth / throttle responses raise so the
-        worker can lock + rotate the account.
+    async def _resolve_profile(self, handle: str) -> tuple[dict | None, str | None]:
+        """Resolve a handle to its profile record by *replaying* the captured
+        profile-info GraphQL query with the username swapped in — no page load.
+
+        This deliberately avoids the bare web_profile_info REST endpoint (which
+        Instagram 429s aggressively): a replayed GraphQL request reuses the seed
+        navigation's signed headers/tokens, so it looks like ordinary web-app
+        traffic (the same reason the timeline replay is accepted). Returns
+        (user, None) on success or (None, code) on an availability verdict; auth
+        / throttle responses raise so the worker can lock + rotate.
         """
-        url = f"{BASE_URL}api/v1/users/web_profile_info/?username={quote(handle)}"
-        headers = merge_header_tokens(
-            {"x-ig-app-id": IG_APP_ID},
-            self.response_interceptor.latest_request_headers,
+        seed = self._profile_seed
+        template = substitute_identity(
+            seed["template"],
+            seed["seed_username"],
+            None,
+            handle,
+            None,
+            reset_cursor=False,
         )
-        for attempt in range(3):
-            try:
-                resp = await self.page.request.get(
-                    url, headers=headers, timeout=REPLAY_TIMEOUT_MS
-                )
-            except Exception as e:
-                return None, f"request error: {e}"
+        strategy = StaticStrategy()
+        body = build_replay_body(
+            template, None, 0, strategy,
+            latest_form=self.response_interceptor.latest_request_form,
+        )
+        headers = merge_header_tokens(
+            template["headers"], self.response_interceptor.latest_request_headers
+        )
+        text, err = await self._send_replay(template, body, headers)
+        if text is None:
+            return None, err or "timeout error"
 
-            status = resp.status
-            if status == 200:
-                text = await resp.text()
-                if text.lstrip().startswith("<"):
-                    raise FailedLoginError("web_profile_info returned HTML (login bounce)")
-                try:
-                    payload = json.loads(text)
-                except Exception:
-                    return None, "response_shape_error"
-                user = (payload.get("data") or {}).get("user")
-                if not user:
-                    return None, "profile is not available"
-                return user, None
-            if status == 404:
-                return None, "profile is not available"
-            if status in (401, 403):
-                raise FailedLoginError(f"web_profile_info status {status}")
-            if status == 429:
-                raise RateLimitError("web_profile_info status 429")
-            if 500 <= status < 600:
-                await asyncio.sleep(2 * (attempt + 1))
-                continue
-            return None, f"web_profile_info status {status}"
-        return None, "timeout error"
+        payloads, errors = parse_response(text)
+        if errors and errors_indicate_rate_limit(errors):
+            raise RateLimitError("; ".join(str(e.get("message")) for e in errors))
+        user = None
+        for data in payloads:
+            if isinstance(data, dict) and data.get("user"):
+                user = data["user"]
+                break
+        if not user:
+            return None, "profile is not available"
+        self.response_interceptor.user_metadata_list.append(user)
+        return user, None
 
     def _classify_profile(self, user: dict) -> str | None:
         """Map a profile record to an availability code, or None if its timeline
@@ -710,19 +716,65 @@ class BrowserSession:
             return "no posts"
         return None
 
-    async def _seed_timeline_template(self, handle: str) -> dict | None:
-        """Navigate a profile once to harvest a live signed timeline template —
-        the one-per-session lazy seed. Availability is already settled via the
-        API, so this only loads the grid and captures the paginating request
-        (a bootstrap scroll provokes it). Returns None if the template never
-        materializes (e.g. navigation timeout)."""
+    async def _seed_via_navigation(
+        self, handle: str, want_timeline: bool
+    ) -> tuple[dict | None, bool]:
+        """Navigate a profile once to harvest live signed templates — the
+        one-per-session lazy seed. The page load fires the profile-info query
+        (cached as `_profile_seed`); when `want_timeline`, a bootstrap scroll also
+        provokes the paginating profile-posts query (cached as `_timeline_seed`,
+        best-effort — a private / zero-post profile never fires it).
+
+        Returns (user, nav_ok): `user` is the profile record captured on load
+        (None if the handle doesn't exist); `nav_ok` is False only when the
+        navigation itself failed (timeout), so the caller can distinguish a
+        missing profile from a transient, retryable error."""
         target_url = f"{BASE_URL}{handle}/"
         try:
             await self._goto(target_url)
         except PWTimeoutError:
-            return None
+            return None, False
         await self._wait_for_first_post()
-        return await self._wait_for_template("user_timeline", timeout=30.0)
+
+        profile_tmpl = await self._wait_for_template(
+            "profile", timeout=15.0, require_cursor=False
+        )
+        user = self._passive_user(handle)
+        if profile_tmpl is not None and self._profile_seed is None:
+            self._profile_seed = {
+                "template": copy.deepcopy(profile_tmpl),
+                "seed_username": handle,
+            }
+
+        # Timeline template is best-effort: capture it if the grid paginates, but
+        # let availability (private / no posts) be judged from the profile record
+        # rather than the absence of this template.
+        if want_timeline and self._timeline_seed is None:
+            timeline_tmpl = await self._wait_for_template("user_timeline", timeout=30.0)
+            if timeline_tmpl is not None:
+                self._timeline_seed = {
+                    "template": copy.deepcopy(timeline_tmpl),
+                    "seed_username": handle,
+                    "seed_user_id": str((user or {}).get("id") or ""),
+                }
+        return user, True
+
+    async def _resolve_or_seed_profile(
+        self, handle: str, want_timeline: bool
+    ) -> tuple[dict | None, str | None]:
+        """Resolve a handle to its profile record, seeding the query template on
+        first use. Replays the cached profile-info query when possible (no page
+        load); otherwise lazily seeds it (and, when `want_timeline`, the
+        paginating template) via one navigation. Returns (user, None) or
+        (None, availability_code)."""
+        if self._profile_seed is None:
+            user, nav_ok = await self._seed_via_navigation(handle, want_timeline)
+            if not nav_ok:
+                return None, "timeout error"
+            if user is None:
+                return None, "profile is not available"
+            return user, None
+        return await self._resolve_profile(handle)
 
     # ==================== Scraping: user_timeline ====================
 
@@ -788,38 +840,36 @@ class BrowserSession:
         start_dt = datetime.strptime(start_date, "%Y-%m-%d")
         start_unix = int(start_dt.timestamp())
 
-        # Resolve the target via the API — numeric id + availability, no page
-        # load. Availability verdicts (not found / private / no posts) short-
-        # circuit here instead of via DOM-text gates.
-        user, code = await self._fetch_profile_api(handle)
+        # Resolve id + availability (seeds the profile query on first use; later
+        # handles replay it — no page load). Availability verdicts (not found /
+        # private / no posts) short-circuit before any pagination.
+        user, code = await self._resolve_or_seed_profile(handle, want_timeline=True)
         if user is None:
             return _result(code or "profile is not available")
-        self.response_interceptor.user_metadata_list.append(user)
         code = self._classify_profile(user)
         if code is not None:
             return _result(code)
-        user_id = user.get("id")
 
-        # Obtain a replayable template. The first scrapeable handle of a session
-        # lazily seeds it via one profile navigation; every later handle re-points
-        # the cached seed at its own id (substitute_identity) — no page load.
+        # Ensure the paginating template is seeded. It is normally captured during
+        # the profile seed navigation; if the profile was seeded earlier (e.g. via
+        # user_profile) it may still be missing, so seed it now with one nav.
         if self._timeline_seed is None:
-            template = await self._seed_timeline_template(handle)
-            if template is None:
+            await self._seed_via_navigation(handle, want_timeline=True)
+            if self._timeline_seed is None:
                 return _result("timeout error")
-            self._timeline_seed = {
-                "template": copy.deepcopy(template),
-                "seed_username": handle,
-                "seed_user_id": str(user_id),
-            }
+
+        # The seed handle's captured template already carries the right identity;
+        # every other handle re-points it (username + id) via substitute_identity.
+        seed = self._timeline_seed
+        if str(seed["seed_username"]).lower() == handle.lower():
+            template = seed["template"]
         else:
-            seed = self._timeline_seed
             template = substitute_identity(
                 seed["template"],
                 seed["seed_username"],
                 seed["seed_user_id"],
                 handle,
-                str(user_id),
+                str(user.get("id")),
             )
 
         params = {
@@ -849,8 +899,12 @@ class BrowserSession:
     # ==================== Scraping: user_profile ====================
 
     async def user_profile(self, handle: str) -> ScrapingResult:
-        """Single-shot profile lookup via the web_profile_info API — one
-        authenticated GET, no page navigation."""
+        """Single-shot profile lookup via the profile-info GraphQL query.
+
+        The first lookup of a session seeds the query template with one profile
+        navigation (and picks up that handle's record passively); every later
+        lookup replays the captured query with the username swapped in — no page
+        load, and no bare web_profile_info REST call (which Instagram 429s)."""
         self.endpoint = "UserProfile"
         self.response_interceptor.flush()
         start_time = datetime.now(timezone.utc)
@@ -866,10 +920,9 @@ class BrowserSession:
                 time_taken=datetime.now(timezone.utc) - start_time,
             )
 
-        user, code = await self._fetch_profile_api(handle)
+        user, code = await self._resolve_or_seed_profile(handle, want_timeline=False)
         if user is None:
             return _result(code or "profile is not available")
-        self.response_interceptor.user_metadata_list.append(user)
         return _result("success")
 
     # ==================== Scraping: post_by_shortcode ====================

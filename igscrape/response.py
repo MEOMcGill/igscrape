@@ -195,6 +195,13 @@ class InstagramResponseInterceptor:
             label = "user_timeline"
         elif any(k in keys for k in SEARCH_DATA_KEYS):
             label = "search"
+        elif "user" in keys:
+            # The profile-info GraphQL query (data['user']) — capture it so we
+            # can resolve later handles by *replaying* this signed request (with
+            # the username swapped) instead of hitting the bare web_profile_info
+            # REST endpoint, which Instagram 429s aggressively. Keyed by username,
+            # so no cursor is involved.
+            label = "profile"
         else:
             return
 
