@@ -42,6 +42,26 @@ FEED_DATA_KEYS = (
 SEARCH_DATA_KEYS = ("xdt_fbsearch__top_serp_graphql",)
 
 
+def has_post_connection(payloads: list[dict]) -> bool:
+    """Whether any payload carries a post connection *object* — i.e. Instagram
+    actually answered the query we replayed.
+
+    Deliberately structural, and deliberately not a post count: an empty-but-
+    present connection (`edges: []`) still means the server resolved the field,
+    whereas a nulled-out or absent connection means it did not. That is the only
+    reliable way to tell a non-fatal side-fragment error from a real breakage,
+    because Instagram returns both under HTTP 200 with an `errors` array (see
+    stop_conditions.GraphQLError).
+    """
+    for data in payloads:
+        if not isinstance(data, dict):
+            continue
+        for key in FEED_DATA_KEYS + SEARCH_DATA_KEYS:
+            if isinstance(data.get(key), dict):
+                return True
+    return False
+
+
 def _post_id(node: dict) -> str | None:
     """Stable id for a post node (XDTMediaDict flat, XDTFeedItem nested)."""
     pid = node.get("pk") or node.get("id")

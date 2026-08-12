@@ -71,31 +71,69 @@ def post_date_filterer(
     return filtered
 
 
-def keep_record(record: dict, handle: str) -> bool:
+def owner_ids(record: dict) -> set[str]:
+    """Numeric author ids carried by a post node, from whichever field survived.
+
+    `owner_id` is an object (`{"pk": "...", "id": "..."}`) on the profile-posts
+    connection, but a bare scalar on other shapes — accept both.
+    """
+    out: set[str] = set()
+    owner = record.get("owner_id")
+    if isinstance(owner, dict):
+        for key in ("pk", "id"):
+            if owner.get(key) is not None:
+                out.add(str(owner[key]))
+    elif owner is not None:
+        out.add(str(owner))
+    return out
+
+
+def keep_record(record: dict, handle: str, user_ids: set[str] | None = None) -> bool:
     """Keep a post if its author or any coauthor matches handle.
 
-    From post_scraper.py:1129-1147.
+    Instagram's profile-posts connection returns `user: null` on every media node
+    (that null on a non-null field is the `field_type_nullability_mismatch` it
+    reports alongside the data) and carries the author as `owner_id` instead.
+    Matching on username alone therefore discarded every post of every handle, so
+    fall back to the numeric id — but only when no username is available: an
+    explicit, mismatched author still loses, so foreign posts picked up from other
+    XHRs stay filtered out.
     """
-    try:
-        author = record["user"]["username"]
-    except (KeyError, TypeError):
-        return False
+    user = record.get("user")
+    author = user.get("username") if isinstance(user, dict) else None
 
-    if handle.lower() == author.lower():
+    if author and handle.lower() == author.lower():
         return True
 
     for coauthor in record.get("coauthor_producers") or []:
-        if coauthor.get("username", "").lower() == handle.lower():
+        if isinstance(coauthor, dict) and (coauthor.get("username") or "").lower() == handle.lower():
             return True
+
+    if not author and user_ids and owner_ids(record) & {str(u) for u in user_ids}:
+        return True
     return False
 
 
-def post_authorship_filterer(handle: str, records: list[dict]) -> list[dict]:
-    """Keep only posts authored or coauthored by `handle`."""
-    filtered = [r for r in records if keep_record(r, handle)]
+def post_authorship_filterer(
+    handle: str, records: list[dict], user_ids: set[str] | None = None
+) -> list[dict]:
+    """Keep only posts authored or coauthored by `handle`.
+
+    `user_ids` are the numeric ids known to belong to `handle` (resolved by the
+    caller from the profile record); they enable the `owner_id` fallback for
+    nodes whose `user` came back null.
+    """
+    filtered = [r for r in records if keep_record(r, handle, user_ids)]
     logger.debug(
         f"{len(records)} records before authorship filter, {len(filtered)} after"
     )
+    if records and not filtered and not user_ids:
+        # The shape that used to fail silently: everything dropped because no
+        # node carried a username and no id was available to fall back on.
+        logger.warning(
+            f"authorship filter dropped all {len(records)} records for @{handle} "
+            f"and no numeric id was resolved — check the profile record capture"
+        )
     return filtered
 
 

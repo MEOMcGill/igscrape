@@ -52,6 +52,27 @@ PARTIAL_CASES = {
     "response_shape_error",
 }
 
+
+def _handle_user_ids(handle: str, users: list[dict] | None) -> set[str]:
+    """Numeric ids belonging to `handle`, taken from the profile records captured
+    during the scrape.
+
+    Needed because the profile-posts connection nulls each node's `user` and
+    identifies the author only by `owner_id`, so the authorship filter has to
+    match on id (see parsers.keep_record).
+    """
+    ids: set[str] = set()
+    for user in users or []:
+        if not isinstance(user, dict):
+            continue
+        if str(user.get("username", "")).lower() != handle.lower():
+            continue
+        for key in ("id", "pk"):
+            if user.get(key) is not None:
+                ids.add(str(user[key]))
+    return ids
+
+
 # Rotation policy: rest after 100 handles
 HANDLES_PER_REST = 100
 REST_SECONDS = 300
@@ -199,6 +220,7 @@ class Worker:
                             post_date_filterer(
                                 post_flattener(result.posts), start, end
                             ),
+                            user_ids=_handle_user_ids(handle, result.users),
                         )
                     # Search results aren't from one author, so only flatten —
                     # no authorship filter. Posts are already XDTMediaDict, so

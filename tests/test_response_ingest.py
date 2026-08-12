@@ -4,7 +4,7 @@ import asyncio
 import json
 from urllib.parse import urlencode
 
-from igscrape.response import InstagramResponseInterceptor
+from igscrape.response import InstagramResponseInterceptor, has_post_connection
 
 
 class _FakeRequest:
@@ -150,3 +150,32 @@ def test_flush_clears_posts_and_templates_but_keeps_tokens():
     assert interceptor.templates == {}
     assert interceptor._seen_post_ids == set()
     assert interceptor.latest_request_form == {"fb_dtsg": "tok"}  # session-level, kept
+
+
+# ---- has_post_connection: telling a side-fragment error from a real breakage ----
+
+
+def test_has_post_connection_true_for_present_connection():
+    assert has_post_connection([_feed_data([{"node": {"__typename": "XDTMediaDict", "pk": "1"}}])])
+
+
+def test_has_post_connection_true_for_empty_but_present_connection():
+    # `edges: []` still means the server resolved the field — not a breakage.
+    assert has_post_connection([_feed_data([])])
+
+
+def test_has_post_connection_false_for_nulled_connection():
+    # What a real field-resolution failure looks like: the key is there, nulled.
+    assert not has_post_connection(
+        [{"xdt_api__v1__feed__user_timeline_graphql_connection": None}]
+    )
+
+
+def test_has_post_connection_false_for_unrelated_payload():
+    assert not has_post_connection([{"xdt_viewer": {"user": {}}}])
+    assert not has_post_connection([])
+    assert not has_post_connection([None, "not a dict"])
+
+
+def test_has_post_connection_true_for_search_serp():
+    assert has_post_connection([{"xdt_fbsearch__top_serp_graphql": {"edges": []}}])
