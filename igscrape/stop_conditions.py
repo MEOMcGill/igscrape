@@ -29,6 +29,11 @@ class StopState:
     error: str | None  # in-body GraphQL error message, if any
     start_unix: int | None  # user-requested start date (UserTimeline only)
     no_progress_streak: int  # consecutive iterations with new_count == 0
+    # Whether the response carried a post connection object at all — i.e. the
+    # server resolved the field we asked for (response.has_post_connection).
+    # Defaults True so a caller that cannot determine it gets the pre-existing
+    # "judge the error by progress alone" behavior.
+    connection_present: bool = True
 
 
 class StopCondition:
@@ -37,13 +42,54 @@ class StopCondition:
 
 
 class GraphQLError(StopCondition):
-    """Bail on an in-body error — but tolerate side-fragment errors when the
-    page still parsed posts and handed us a live cursor (mirrors fbscrape)."""
+    """Bail on an in-body error only when the response was actually unusable.
+
+    Instagram serves the profile-posts query with a non-fatal
+    `field_type_nullability_mismatch` error permanently attached: HTTP 200, a
+    complete `edges` array, a live `end_cursor`, and an `errors` entry that
+    carries no `path` (it belongs to a side fragment, not to the connection).
+    An error alone therefore says nothing about whether collection can proceed.
+
+    What it may NOT key off is `new_count`. The bootstrap iteration replays the
+    captured template's own cursor, so it necessarily re-fetches the page the
+    live page-load listener already ingested and `new_count == 0` is structurally
+    guaranteed (see browser_session._replay_pagination_loop). Treating that as
+    "error and no progress" aborted every single handle at replay #0 while the
+    response in hand held a full page of posts and a live cursor.
+
+    So bail when either:
+      - the connection object is missing/nulled — the server did not resolve the
+        field, nothing here is trustworthy; or
+      - the error persists across `max_error_streak` iterations that each added
+        nothing — tolerating further would let a genuinely broken feed exit
+        through NoNewPostsStreak and report the *success* code "scraped until
+        first ever post was reached", i.e. claim an empty account. A retryable
+        failure is the honest answer.
+
+    Otherwise let the ordinary conditions (end-of-feed, date cutoff, no-progress)
+    decide, exactly as on an error-free response.
+    """
+
+    #: Consecutive zero-new-post iterations tolerated while an error is present.
+    #: 2 clears the bootstrap re-fetch (always 1) with a margin of one.
+    max_error_streak = 2
 
     def evaluate(self, state):
-        if state.error and (state.new_count == 0 or not state.end_cursor):
-            logger.warning(f"graphql error response: {state.error}")
+        if not state.error:
+            return None
+        if not state.connection_present:
+            logger.warning(f"graphql error response (no connection): {state.error}")
             return "something went wrong - reload"
+        if state.no_progress_streak >= self.max_error_streak:
+            logger.warning(
+                f"graphql error response persisted for {state.no_progress_streak} "
+                f"page(s) with no new posts: {state.error}"
+            )
+            return "something went wrong - reload"
+        logger.debug(
+            f"tolerating non-fatal graphql error (connection intact, "
+            f"streak {state.no_progress_streak}): {state.error}"
+        )
         return None
 
 

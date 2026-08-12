@@ -97,10 +97,67 @@ def test_graphql_error_tolerated_with_posts_and_cursor():
     assert GraphQLError().evaluate(_state(error="boom", new_count=5, end_cursor="C")) is None
 
 
-def test_graphql_error_fires_when_no_progress():
+NULLABILITY = (
+    "A server error field_type_nullability_mismatch occured. "
+    "Check server logs for details."
+)
+
+
+def test_graphql_error_tolerated_on_bootstrap_refetch():
+    """The regression that aborted every handle at replay #0.
+
+    The bootstrap replay re-sends the captured template's own cursor, so it
+    re-fetches the page the live listener already ingested: new_count == 0 with a
+    full connection and a live cursor in hand. Instagram attaches a permanent
+    non-fatal nullability error to that response. It must not end the scrape.
+    """
     assert GraphQLError().evaluate(
-        _state(error="boom", new_count=0, end_cursor=None)
+        _state(
+            iter_index=0,
+            cursor_sent="CUR",
+            error=NULLABILITY,
+            new_count=0,
+            no_progress_streak=1,
+            end_cursor="CUR2",
+            has_next_page=True,
+            connection_present=True,
+        )
+    ) is None
+
+
+def test_graphql_error_fires_when_connection_missing():
+    # Nulled / absent connection: the server never resolved the field, so
+    # nothing in this response is trustworthy.
+    assert GraphQLError().evaluate(
+        _state(error="boom", new_count=0, connection_present=False)
     ) == "something went wrong - reload"
+
+
+def test_graphql_error_fires_when_error_persists_without_progress():
+    # Connection intact but nothing new twice running — report a retryable
+    # failure rather than letting NoNewPostsStreak exit through the *success*
+    # code and claim the account was scraped to its first ever post.
+    assert GraphQLError().evaluate(
+        _state(error=NULLABILITY, new_count=0, no_progress_streak=2)
+    ) == "something went wrong - reload"
+
+
+def test_graphql_error_tolerated_on_final_page():
+    """End of feed with the error still attached must stay a success path.
+
+    GraphQLError runs before EndOfFeed, so tolerating here is what lets a
+    low-volume account terminate as "reached first ever post" instead of failing
+    after everything was already collected.
+    """
+    state = _state(
+        error=NULLABILITY, new_count=4, end_cursor=None, has_next_page=False
+    )
+    assert GraphQLError().evaluate(state) is None
+    assert EndOfFeed().evaluate(state) == "scraped until first ever post was reached"
+
+
+def test_no_error_is_never_flagged():
+    assert GraphQLError().evaluate(_state(error=None, connection_present=False)) is None
 
 
 def test_assemble_user_timeline_includes_date_and_shape_conditions():
