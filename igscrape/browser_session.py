@@ -43,7 +43,7 @@ from .pagination import (
     select_cursor_strategy,
     substitute_identity,
 )
-from .parsers import get_post_timestamp, post_flattener
+from .parsers import get_post_timestamp, owner_ids, post_flattener
 from .response import InstagramResponseInterceptor, has_post_connection
 from .stop_conditions import StopState, assemble_default_stop_conditions
 from .utils import get_device_os
@@ -660,10 +660,24 @@ class BrowserSession:
         return users[-1] if users else None
 
     @staticmethod
-    def _owner_from_payloads(payloads: list[dict]) -> dict | None:
-        """The post owner (a user record: id, pk, username, is_private, full_name)
-        lifted from the first edge of a profile-posts response. Its presence also
-        proves the timeline is visible to us."""
+    def _owner_from_payloads(payloads: list[dict], handle: str | None = None) -> dict | None:
+        """The post owner lifted from the first edge of a profile-posts response.
+        Its presence also proves the timeline is visible to us.
+
+        Instagram nulls `user` on every node of this connection — that null on a
+        non-null field is the `field_type_nullability_mismatch` the response
+        reports — and carries the author only as `owner_id`. The response holds no
+        owner username and no `is_private` at all (the `username` strings in it
+        belong to caption mentions, `usertags` and `ig_artist`, none of which is
+        the owner). So fall back to synthesizing the record from `owner_id`,
+        taking the username from `handle`: this connection is *keyed* by username,
+        so edges coming back for a username-keyed request is itself the proof that
+        they are that handle's posts.
+
+        Without this fallback every public account resolved to None and was
+        reported as "account is private" — a SUCCESS code, so it would have
+        written an empty file per seed and called it a clean run.
+        """
         for data in payloads:
             if not isinstance(data, dict):
                 continue
@@ -675,6 +689,13 @@ class BrowserSession:
                 owner = node.get("user") or (node.get("media") or {}).get("user")
                 if owner:
                     return owner
+                ids = owner_ids(node) or owner_ids(node.get("media") or {})
+                if ids:
+                    pk = sorted(ids)[0]
+                    record = {"pk": pk, "id": pk}
+                    if handle:
+                        record["username"] = handle
+                    return record
         return None
 
     @staticmethod
@@ -703,10 +724,11 @@ class BrowserSession:
         This deliberately avoids the bare web_profile_info REST endpoint (which
         Instagram 429s aggressively): a replayed GraphQL request reuses the seed
         navigation's signed headers/tokens, so it reads as ordinary web-app
-        traffic (the same reason the timeline replay is accepted). Page 1's first
-        post carries the owner (id + is_private + username). Returns (owner, None)
-        when the timeline is visible, else (None, code); auth / throttle responses
-        raise so the worker can lock + rotate."""
+        traffic (the same reason the timeline replay is accepted). Page 1's edges
+        identify the owner (see _owner_from_payloads: by `owner_id`, since IG nulls
+        each node's `user`). Returns (owner, None) when the timeline is visible,
+        else (None, code); auth / throttle responses raise so the worker can
+        lock + rotate."""
         template = self._retarget_seed(handle, reset_cursor=True)
         body = build_replay_body(
             template, None, DEFAULT_PAGE_COUNT, StaticStrategy(),
@@ -723,7 +745,7 @@ class BrowserSession:
         if errors and errors_indicate_rate_limit(errors):
             raise RateLimitError("; ".join(str(e.get("message")) for e in errors))
 
-        owner = self._owner_from_payloads(payloads)
+        owner = self._owner_from_payloads(payloads, handle)
         if owner is None:
             # Connection present but empty: the account exists yet exposes no
             # posts to us (private-and-not-followed, or genuinely none). No
@@ -734,7 +756,9 @@ class BrowserSession:
 
         # Guard the handle→account resolution: IG occasionally maps a query to a
         # different account. Never return another account's data under this
-        # handle.
+        # handle. Only bites when IG returned a real `user` record whose username
+        # disagrees — a record synthesized from `owner_id` carries the handle we
+        # asked for, which is all the username-keyed query can attest to.
         if str(owner.get("username", "")).lower() != handle.lower():
             logger.warning(
                 f"profile replay for @{handle} resolved to "
