@@ -463,6 +463,162 @@ def export_cookies(ctx, username, output_file):
     run_async(_e())
 
 
+@cli.command()
+@click.argument("username", nargs=-1)
+@click.option(
+    "--mode",
+    type=click.Choice(["automatic", "manual"]),
+    default="automatic",
+    help="automatic: run the same form-fill login the worker uses on scrape start "
+    "(the account needs a stored password). manual: open the browser and wait for "
+    "you to log in by hand, then save the cookies. Default: automatic.",
+)
+@click.option(
+    "--headless/--no-headless",
+    default=False,
+    help="Run the browser headless. Default: --no-headless, since a first login "
+    "usually needs a human for 2FA or a challenge.",
+)
+@click.option(
+    "--timeout",
+    default=300,
+    show_default=True,
+    help="--mode manual only: seconds to wait for you to finish logging in.",
+)
+@click.option(
+    "--log-level",
+    type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]),
+    default="INFO",
+    help="Logging level. DEBUG may log sensitive information.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Log in even if the account is marked in_use by a running scrape. "
+    "Off by default: two browsers on one Instagram session can invalidate it.",
+)
+@click.pass_context
+def login(ctx, username, mode, headless, timeout, log_level, force):
+    """Log in one or more accounts and persist their cookies to the DB.
+
+    Solves the chicken-and-egg problem in the normal flow: `get_available()`
+    only hands out accounts with `active = true`, and a freshly added account
+    has `active = bool(cookies)` — i.e. false — so it is never selected and
+    therefore never gets its first login. This command targets an account **by
+    name** via `pool.get()`, so it bypasses both the active gate and the
+    `scroll_count_overall_24h ASC` ordering, and cannot grab a different
+    account than the one you asked for.
+
+    On success the cookies are saved and the account is marked active with its
+    error cleared, so the pool will start handing it out.
+
+    \b
+    --mode automatic: fills username + password. Instagram's post-login wait
+        already tolerates a human completing 2FA or a challenge in the visible
+        browser, so this usually works for a first login too — just be at the
+        screen.
+
+    \b
+    --mode manual: opens instagram.com and waits (see --timeout) while you log
+        in by hand, then saves whatever session you ended up with. Use this
+        when the account needs email/SMS verification, or has no stored
+        password. Progress is polled, not prompted, so it works when driven
+        over SSH.
+
+    Accounts are processed one browser at a time. A failure on one does not
+    abort the rest; the command exits non-zero if any failed.
+    """
+    from .browser_session import BrowserSession
+    from .exceptions import FailedLoginError
+
+    if not username:
+        raise click.UsageError("Provide at least one username.")
+
+    async def _login_one(pool, name: str) -> bool:
+        try:
+            account = await pool.get(name)
+        except ValueError:
+            click.echo(f"Account not found: {name}")
+            return False
+
+        if account.in_use and not force:
+            click.echo(
+                f"{name}: in_use is set — a scrape is probably holding this account. "
+                f"Opening a second browser on the same session can invalidate it. "
+                f"Wait for the run, or pass --force if you know the lock is stale."
+            )
+            return False
+
+        if mode == "automatic" and not account.password:
+            click.echo(f"{name}: no stored password — use --mode manual.")
+            return False
+
+        # auto_login mirrors the mode: automatic lets initialize() run the
+        # existing reauth + form-fill path, manual keeps it hands-off so the
+        # human is not racing the form filler.
+        session = BrowserSession(
+            account, pool, headless=headless, auto_login=(mode == "automatic")
+        )
+        try:
+            await session.initialize()
+
+            if mode == "manual":
+                click.echo(
+                    f"{name}: log in using the browser window "
+                    f"(waiting up to {timeout}s)..."
+                )
+                if not await session.wait_until_logged_in(timeout=float(timeout)):
+                    click.echo(f"{name}: still not logged in after {timeout}s; nothing saved.")
+                    return False
+                n = await session.save_cookies()
+                await pool.set_active(name, True, None)
+                click.echo(f"{name}: logged in, saved {n} cookies.")
+                return True
+
+            # automatic: initialize() already ran login() (which saves cookies
+            # and marks the account active) and raises on failure. A session
+            # that was already logged in via valid cookies lands here too, so
+            # refresh them rather than leaving a stale set on disk.
+            n = await session.save_cookies()
+            await pool.set_active(name, True, None)
+            click.echo(f"{name}: logged in, saved {n} cookies.")
+            return True
+        except FailedLoginError as e:
+            # login() already recorded active=False + the error on the account.
+            click.echo(f"{name}: login failed — {e}")
+            return False
+        except Exception as e:
+            click.echo(f"{name}: login error — {e}")
+            return False
+        finally:
+            try:
+                await session.close()
+            except Exception:
+                pass
+
+    async def _login():
+        set_log_level(log_level)
+        pool = AccountsPool(ctx.obj["db"])
+        results: dict[str, bool] = {}
+        for name in username:
+            if len(username) > 1:
+                click.echo(f"\n=== {name} ({len(results) + 1}/{len(username)}) ===")
+            results[name] = await _login_one(pool, name)
+
+        if len(username) > 1:
+            failed = [n for n, ok in results.items() if not ok]
+            click.echo(
+                f"\nDone: {len(results) - len(failed)} succeeded, {len(failed)} failed."
+            )
+            if failed:
+                click.echo("Failed: " + ", ".join(failed))
+
+        if not all(results.values()):
+            raise click.ClickException("One or more logins failed.")
+
+    run_async(_login())
+
+
 # ============== Scraping ==============
 
 
