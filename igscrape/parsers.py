@@ -91,13 +91,13 @@ def owner_ids(record: dict) -> set[str]:
 def keep_record(record: dict, handle: str, user_ids: set[str] | None = None) -> bool:
     """Keep a post if its author or any coauthor matches handle.
 
-    From post_scraper.py:1129-1147, plus an id-based fallback: Instagram's
-    profile-posts connection returns `user: null` on every media node (that null
-    on a non-null field is the `field_type_nullability_mismatch` it reports
-    alongside the data) and carries the author as `owner_id` instead. Matching on
-    username alone therefore discarded every post of every handle. The fallback
-    only applies when no username is available — an explicit, mismatched author
-    still loses, so foreign posts picked up from other XHRs stay filtered out.
+    Instagram's profile-posts connection returns `user: null` on every media node
+    (that null on a non-null field is the `field_type_nullability_mismatch` it
+    reports alongside the data) and carries the author as `owner_id` instead.
+    Matching on username alone therefore discarded every post of every handle, so
+    fall back to the numeric id — but only when no username is available: an
+    explicit, mismatched author still loses, so foreign posts picked up from other
+    XHRs stay filtered out.
     """
     user = record.get("user")
     author = user.get("username") if isinstance(user, dict) else None
