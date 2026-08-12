@@ -97,10 +97,92 @@ def test_graphql_error_tolerated_with_posts_and_cursor():
     assert GraphQLError().evaluate(_state(error="boom", new_count=5, end_cursor="C")) is None
 
 
-def test_graphql_error_fires_when_no_progress():
+NULLABILITY = (
+    "A server error field_type_nullability_mismatch occured. "
+    "Check server logs for details."
+)
+
+
+def test_graphql_error_tolerated_on_bootstrap_refetch():
+    """The regression that aborted every handle at replay #0.
+
+    The bootstrap replay re-sends the captured template's own cursor, so it
+    re-fetches the page the live listener already ingested: new_count == 0 with a
+    full connection and a live cursor in hand. Instagram attaches a permanent
+    non-fatal nullability error to that response. It must not end the scrape.
+    """
     assert GraphQLError().evaluate(
-        _state(error="boom", new_count=0, end_cursor=None)
+        _state(
+            iter_index=0,
+            cursor_sent="CUR",
+            error=NULLABILITY,
+            new_count=0,
+            no_progress_streak=1,
+            end_cursor="CUR2",
+            has_next_page=True,
+            connection_present=True,
+        )
+    ) is None
+
+
+def test_graphql_error_fires_when_connection_missing():
+    # Nulled / absent connection: the server never resolved the field, so
+    # nothing in this response is trustworthy.
+    assert GraphQLError().evaluate(
+        _state(error="boom", new_count=0, connection_present=False)
     ) == "something went wrong - reload"
+
+
+def test_graphql_error_tolerated_while_cursor_advances_despite_dedup():
+    """A fully-deduped page is not stagnation.
+
+    The page-load listener keeps ingesting while the replay loop runs, so a
+    replayed page can arrive entirely duplicate (new_count == 0) two iterations
+    running while the feed is really advancing — observed live on @madwanika.
+    Only the cursor failing to move means stuck.
+    """
+    assert GraphQLError().evaluate(
+        _state(
+            error=NULLABILITY,
+            new_count=0,
+            no_progress_streak=2,
+            cursor_sent="CUR",
+            end_cursor="CUR2",
+            has_next_page=True,
+        )
+    ) is None
+
+
+def test_graphql_error_fires_when_cursor_does_not_advance():
+    # Instagram claims a next page but returned the cursor we just sent: an
+    # error with no way forward.
+    assert GraphQLError().evaluate(
+        _state(error=NULLABILITY, cursor_sent="CUR", end_cursor="CUR", has_next_page=True)
+    ) == "something went wrong - reload"
+
+
+def test_graphql_error_fires_when_next_page_promised_but_no_cursor():
+    assert GraphQLError().evaluate(
+        _state(error=NULLABILITY, cursor_sent="CUR", end_cursor=None, has_next_page=True)
+    ) == "something went wrong - reload"
+
+
+def test_graphql_error_tolerated_on_final_page():
+    """End of feed with the error still attached must stay a success path.
+
+    GraphQLError runs before EndOfFeed, so tolerating here is what lets a
+    low-volume account terminate as "reached first ever post" instead of failing
+    after everything was already collected.
+    """
+    state = _state(
+        error=NULLABILITY, new_count=4, end_cursor=None, has_next_page=False
+    )
+    assert GraphQLError().evaluate(state) is None
+    assert EndOfFeed().evaluate(state) == "scraped until first ever post was reached"
+
+
+def test_no_error_is_never_flagged():
+    assert GraphQLError().evaluate(_state(error=None, connection_present=False)) is None
 
 
 def test_assemble_user_timeline_includes_date_and_shape_conditions():

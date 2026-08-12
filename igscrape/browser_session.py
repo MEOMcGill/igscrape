@@ -44,7 +44,7 @@ from .pagination import (
     substitute_identity,
 )
 from .parsers import get_post_timestamp, post_flattener
-from .response import InstagramResponseInterceptor
+from .response import InstagramResponseInterceptor, has_post_connection
 from .stop_conditions import StopState, assemble_default_stop_conditions
 from .utils import get_device_os
 
@@ -583,6 +583,7 @@ class BrowserSession:
                 error=error_str,
                 start_unix=start_unix,
                 no_progress_streak=no_progress_streak,
+                connection_present=has_post_connection(payloads),
             )
 
             logger.info(

@@ -29,6 +29,11 @@ class StopState:
     error: str | None  # in-body GraphQL error message, if any
     start_unix: int | None  # user-requested start date (UserTimeline only)
     no_progress_streak: int  # consecutive iterations with new_count == 0
+    # Whether the response carried a post connection object at all — i.e. the
+    # server resolved the field we asked for (response.has_post_connection).
+    # Defaults True so a caller that cannot determine it gets the pre-existing
+    # "judge the error by progress alone" behavior.
+    connection_present: bool = True
 
 
 class StopCondition:
@@ -37,13 +42,53 @@ class StopCondition:
 
 
 class GraphQLError(StopCondition):
-    """Bail on an in-body error — but tolerate side-fragment errors when the
-    page still parsed posts and handed us a live cursor (mirrors fbscrape)."""
+    """Bail on an in-body error only when the response was actually unusable.
+
+    Instagram serves the profile-posts query with a non-fatal
+    `field_type_nullability_mismatch` error permanently attached: HTTP 200, a
+    complete `edges` array, a live `end_cursor`, and an `errors` entry that
+    carries no `path` (it belongs to a side fragment, not to the connection).
+    An error alone therefore says nothing about whether collection can proceed.
+
+    What it may NOT key off is `new_count`. The bootstrap iteration replays the
+    captured template's own cursor, so it necessarily re-fetches the page the
+    live page-load listener already ingested and `new_count == 0` is structurally
+    guaranteed (see browser_session._replay_pagination_loop). Treating that as
+    "error and no progress" aborted every single handle at replay #0 while the
+    response in hand held a full page of posts and a live cursor.
+
+    Nor is `no_progress_streak` a usable signal, for the same underlying reason:
+    the page-load listener keeps ingesting on its own while the replay loop runs,
+    so a replayed page can arrive entirely deduped (`new_count == 0`) while the
+    feed is in fact advancing — observed twice running on a live handle. The
+    reliable test is whether the *cursor* moved.
+
+    So bail when either:
+      - the connection object is missing/nulled — the server did not resolve the
+        field, nothing here is trustworthy (this also covers transport errors,
+        where there are no payloads at all); or
+      - Instagram says there is a next page but did not hand us a new cursor to
+        reach it — an error plus no way forward, i.e. genuinely stuck.
+
+    Otherwise let the ordinary conditions (end-of-feed, date cutoff, no-progress)
+    decide, exactly as on an error-free response. In particular an error on the
+    final page is tolerated so EndOfFeed can report success, rather than failing
+    a handle after everything was already collected.
+    """
 
     def evaluate(self, state):
-        if state.error and (state.new_count == 0 or not state.end_cursor):
-            logger.warning(f"graphql error response: {state.error}")
+        if not state.error:
+            return None
+        if not state.connection_present:
+            logger.warning(f"graphql error response (no connection): {state.error}")
             return "something went wrong - reload"
+        advanced = bool(state.end_cursor) and state.end_cursor != state.cursor_sent
+        if state.has_next_page and not advanced:
+            logger.warning(
+                f"graphql error response and the cursor did not advance: {state.error}"
+            )
+            return "something went wrong - reload"
+        logger.debug(f"tolerating non-fatal graphql error: {state.error}")
         return None
 
 
