@@ -57,22 +57,24 @@ class GraphQLError(StopCondition):
     "error and no progress" aborted every single handle at replay #0 while the
     response in hand held a full page of posts and a live cursor.
 
+    Nor is `no_progress_streak` a usable signal, for the same underlying reason:
+    the page-load listener keeps ingesting on its own while the replay loop runs,
+    so a replayed page can arrive entirely deduped (`new_count == 0`) while the
+    feed is in fact advancing — observed twice running on a live handle. The
+    reliable test is whether the *cursor* moved.
+
     So bail when either:
       - the connection object is missing/nulled — the server did not resolve the
-        field, nothing here is trustworthy; or
-      - the error persists across `max_error_streak` iterations that each added
-        nothing — tolerating further would let a genuinely broken feed exit
-        through NoNewPostsStreak and report the *success* code "scraped until
-        first ever post was reached", i.e. claim an empty account. A retryable
-        failure is the honest answer.
+        field, nothing here is trustworthy (this also covers transport errors,
+        where there are no payloads at all); or
+      - Instagram says there is a next page but did not hand us a new cursor to
+        reach it — an error plus no way forward, i.e. genuinely stuck.
 
     Otherwise let the ordinary conditions (end-of-feed, date cutoff, no-progress)
-    decide, exactly as on an error-free response.
+    decide, exactly as on an error-free response. In particular an error on the
+    final page is tolerated so EndOfFeed can report success, rather than failing
+    a handle after everything was already collected.
     """
-
-    #: Consecutive zero-new-post iterations tolerated while an error is present.
-    #: 2 clears the bootstrap re-fetch (always 1) with a margin of one.
-    max_error_streak = 2
 
     def evaluate(self, state):
         if not state.error:
@@ -80,16 +82,13 @@ class GraphQLError(StopCondition):
         if not state.connection_present:
             logger.warning(f"graphql error response (no connection): {state.error}")
             return "something went wrong - reload"
-        if state.no_progress_streak >= self.max_error_streak:
+        advanced = bool(state.end_cursor) and state.end_cursor != state.cursor_sent
+        if state.has_next_page and not advanced:
             logger.warning(
-                f"graphql error response persisted for {state.no_progress_streak} "
-                f"page(s) with no new posts: {state.error}"
+                f"graphql error response and the cursor did not advance: {state.error}"
             )
             return "something went wrong - reload"
-        logger.debug(
-            f"tolerating non-fatal graphql error (connection intact, "
-            f"streak {state.no_progress_streak}): {state.error}"
-        )
+        logger.debug(f"tolerating non-fatal graphql error: {state.error}")
         return None
 
 

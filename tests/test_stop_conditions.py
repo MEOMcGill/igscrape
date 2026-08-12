@@ -133,12 +133,37 @@ def test_graphql_error_fires_when_connection_missing():
     ) == "something went wrong - reload"
 
 
-def test_graphql_error_fires_when_error_persists_without_progress():
-    # Connection intact but nothing new twice running — report a retryable
-    # failure rather than letting NoNewPostsStreak exit through the *success*
-    # code and claim the account was scraped to its first ever post.
+def test_graphql_error_tolerated_while_cursor_advances_despite_dedup():
+    """A fully-deduped page is not stagnation.
+
+    The page-load listener keeps ingesting while the replay loop runs, so a
+    replayed page can arrive entirely duplicate (new_count == 0) two iterations
+    running while the feed is really advancing — observed live on @madwanika.
+    Only the cursor failing to move means stuck.
+    """
     assert GraphQLError().evaluate(
-        _state(error=NULLABILITY, new_count=0, no_progress_streak=2)
+        _state(
+            error=NULLABILITY,
+            new_count=0,
+            no_progress_streak=2,
+            cursor_sent="CUR",
+            end_cursor="CUR2",
+            has_next_page=True,
+        )
+    ) is None
+
+
+def test_graphql_error_fires_when_cursor_does_not_advance():
+    # Instagram claims a next page but returned the cursor we just sent: an
+    # error with no way forward.
+    assert GraphQLError().evaluate(
+        _state(error=NULLABILITY, cursor_sent="CUR", end_cursor="CUR", has_next_page=True)
+    ) == "something went wrong - reload"
+
+
+def test_graphql_error_fires_when_next_page_promised_but_no_cursor():
+    assert GraphQLError().evaluate(
+        _state(error=NULLABILITY, cursor_sent="CUR", end_cursor=None, has_next_page=True)
     ) == "something went wrong - reload"
 
 
