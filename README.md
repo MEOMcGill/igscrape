@@ -86,8 +86,7 @@ headless=False, mobile=False)` — `db` takes a path or an existing `AccountsPoo
 
 ## Accounts
 
-Instagram serves almost nothing to logged-out sessions, so you need at least one
-account in the pool before scraping:
+Before scraping you need at least one Instagram account in the pool:
 
 ```bash
 igscrape add --username myuser --password mypass
@@ -204,23 +203,6 @@ From `igscrape.worker`:
 | `target crashed` / `logged out while scraping`                 | crash    |
 
 Retryable results trigger up to 3 attempts with account rotation (accounts that hit `failed to load` are locked for 15 minutes, set by `RETRY_MINUTES`). After `HANDLES_PER_REST` (100) successful handles on one account, the worker rotates.
-
-## How it works
-
-A `WorkerPool` runs up to `max_browser_sessions` workers concurrently. Each
-worker checks an account out of the SQLite pool (row-locked, handed out
-least-scrolled-in-the-last-24h first), launches a Camoufox session, restores that
-account's cookies, and pulls queries off a shared queue.
-
-Inside a session, an interceptor watches the network for the GraphQL and REST
-responses Instagram's front end makes, and captured requests are then replayed
-directly for pagination — cursor handling differs per endpoint (`after` /
-`end_cursor` for GraphQL connections, `max_id` / `next_max_id` for `/api/v1`
-endpoints), so a `CursorStrategy` keeps the collection loop endpoint-agnostic.
-Stop conditions end a scroll when the target date is passed, the first-ever post
-is reached, or the feed stops yielding new posts. Whatever happens is
-categorised into the result codes above, and retryable failures rotate to a
-fresh account rather than failing the query.
 
 ## Project layout
 

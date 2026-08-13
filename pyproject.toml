@@ -12,8 +12,8 @@ requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [
+    { name = "Mika Desblancs-Patel", email = "mika.desblancs@mcgill.ca" },
     { name = "Ben Steel", email = "benjamin.steel@mcgill.ca" },
-    { name = "Mika Desblancs" },
 ]
 maintainers = [
     { name = "Media Ecosystem Observatory" },
