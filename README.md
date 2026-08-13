@@ -1,8 +1,47 @@
-# igscrape
+# igscrape — async Instagram scraper for Python
 
-Standalone Instagram scraper.
+Scrape Instagram user timelines, profiles, posts, and keyword-search results from
+Python or the command line. `igscrape` drives real logged-in browser sessions
+(Camoufox, a fingerprint-hardened Firefox), intercepts Instagram's own XHR
+responses instead of parsing HTML, and rotates through a pool of accounts so long
+collection runs survive rate limits, challenges, and crashes.
 
-An async Python API backed by a SQLite account pool, an asyncio `WorkerPool` of Camoufox browser sessions, and a Click CLI for account management. The Instagram scraping primitives — login flow, XHR interception targets, scroll termination conditions, result-code taxonomy, and account rotation — are designed to be resilient and production-tested.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+
+Built and maintained at the [Media Ecosystem Observatory](https://www.mediaecosystemobservatory.com/)
+for social-media research. Sibling project: [pytok](https://github.com/networkdynamics/pytok),
+the same approach for TikTok.
+
+## Why igscrape
+
+- **Raw API records, not scraped HTML.** Every post arrives as the JSON node
+  Instagram's own front end received, so fields like `pk`, `taken_at`,
+  `like_count`, `coauthor_producers`, and DASH video manifests are all intact.
+- **Built for long runs.** A SQLite account pool with row locking, automatic
+  rotation, per-endpoint scroll accounting, a retry taxonomy, and recovery from
+  wedged browser sessions.
+- **Date-bounded timeline collection.** Ask for a window and the scroll stops
+  when it reaches it — no downloading a whole profile to keep one month.
+- **Concurrent by default.** An asyncio `WorkerPool` of browser sessions
+  processes many handles at once from one `async with` block.
+- **Streaming output.** Write posts to JSONL as they arrive, or hand each batch
+  to your own callback, so a run that dies at hour six keeps its first five.
+- **Batteries for analysis.** Flatten to a 44-column CSV/Parquet, and download
+  images or (ffmpeg-muxed) videos straight from a result file.
+
+## What it collects
+
+| Endpoint | Python | CLI |
+|---|---|---|
+| Posts from a handle, date-bounded | `scraper.user_timeline(handle, start_date, end_date)` | `igscrape scrape user-timeline <handle>...` |
+| Profile metadata for a handle | `scraper.user_profile(handle)` | `igscrape scrape user-profile <handle>...` |
+| A single post by shortcode | `scraper.post_by_shortcode(shortcode)` | `igscrape scrape post <shortcode>...` |
+| Accounts recommended alongside a handle | `scraper.chaining(handle)` | `igscrape scrape chaining <handle>...` |
+| Posts from keyword search | `scraper.search(keyword, max_posts=N)` | `igscrape scrape search <keyword>...` |
+
+Every call returns a `ScrapingResult` with `.posts`, `.users`, `.result` (a
+result code, see below), `.time_started`, and `.time_taken`.
 
 ## Install
 
@@ -11,7 +50,10 @@ pip install -e .
 playwright install firefox
 ```
 
-## Quick start (Python API)
+Optional: `ffmpeg` on `PATH` for merged video downloads, `polars` for Parquet
+export (already a dependency).
+
+## Quick start (Python)
 
 ```python
 import asyncio
@@ -39,6 +81,9 @@ await scraper.chaining("natgeo")
 await scraper.search("coffee", max_posts=100)   # keyword-search SERP posts
 ```
 
+`InstagramScraper(db="accounts.db", max_browser_sessions=5, handles_per_rest=100,
+headless=False, mobile=False)` — `db` takes a path or an existing `AccountsPool`.
+
 ## Accounts
 
 Before scraping you need at least one Instagram account in the pool:
@@ -64,6 +109,9 @@ hand instead:
 ```bash
 igscrape login myuser --mode manual --timeout 600
 ```
+
+Have a human at the screen for a first login — Instagram commonly asks for 2FA or
+shows a challenge, which is why the browser is non-headless by default.
 
 Full CLI reference:
 
@@ -102,6 +150,29 @@ Export:
   igscrape export-posts <scraped.json> -o posts.csv       # or .parquet
 ```
 
+## Streaming results
+
+`user_timeline` and `search` accept three optional sinks that fire as each page
+of results arrives, rather than only at the end. They compose — any combination
+runs together:
+
+```python
+await scraper.user_timeline(
+    handle="natgeo",
+    start_date="2024-01-01",
+    end_date="2024-12-31",
+    jsonl_path="data/natgeo.jsonl",       # append each raw post node as one JSON line
+    on_new_posts=my_callback,             # called with each batch of new raw nodes
+    download_videos=True,                 # fetch every mp4 as it is discovered
+    video_dir="data/videos",
+)
+```
+
+The returned `ScrapingResult` is unchanged by any of these. On the result itself,
+`result.save(path)` writes JSON (or JSONL when the path ends in `.jsonl`/
+`.ndjson`), and `result.save_all(base)` writes both `<base>.json` and
+`<base>.jsonl`.
+
 ### Keyword search
 
 `scrape search` / `scraper.search(keyword, max_posts=...)` collects posts from
@@ -129,7 +200,10 @@ Environment variables:
 - `IG_LOG_LEVEL` — `TRACE`/`DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL` (default `INFO`)
 - `IG_RAISE_WHEN_NO_ACCOUNT` — raise `NoAccountError` immediately instead of waiting
 
-Default DB path: `~/db/accounts.db` relative to the repo root. Override with `igscrape --db /path/to/accounts.db ...` or pass `db=` to `InstagramScraper`.
+Account database location: the CLI defaults to `db/accounts.db` under the
+repository root, while `InstagramScraper` defaults to `accounts.db` in the
+working directory. Override with `igscrape --db /path/to/accounts.db ...` or by
+passing `db=` to `InstagramScraper`.
 
 ## Result codes
 
@@ -158,19 +232,30 @@ igscrape/
   browser_session.py      # Camoufox + IG login + per-endpoint scrapers
   cli.py                  # Click CLI
   db.py                   # aiosqlite wrapper + migrations
-  downloaders.py          # image/video downloaders (ported from consumers)
+  downloaders.py          # image/video downloaders
   exceptions.py
+  exporter.py             # CSV/Parquet post export
   logger.py               # loguru wrapper
   models.py               # Query, ScrapingResult
+  pagination.py           # cursor strategies + replay-request construction
   parsers.py              # post_flattener, date/authorship filters, asset extractors
   response.py             # XHR interceptor
   scraper.py              # InstagramScraper high-level API
+  stop_conditions.py      # scroll termination rules
   utils.py
-  worker.py               # handles result-code taxonomy + rotation
+  worker.py               # result-code taxonomy + rotation
   worker_pool.py          # asyncio producer-consumer pool
-examples/
-  test_user_timeline.py
-  test_user_profile.py
-  test_post_by_shortcode.py
-  test_downloaders.py
+examples/                 # runnable scripts per endpoint
+tests/                    # pytest suite (pytest -q)
 ```
+
+## Responsible use
+
+This is a research tool. Collecting data from Instagram with it is your
+responsibility: check Instagram's terms, your institution's ethics requirements,
+and applicable law before you run it. Prefer public accounts, collect the
+minimum you need, and don't redistribute personal data you shouldn't.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
