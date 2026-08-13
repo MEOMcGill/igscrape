@@ -45,8 +45,24 @@ Before scraping you need at least one Instagram account in the pool:
 
 ```bash
 igscrape add --username myuser --password mypass
+igscrape login myuser              # first session: saves cookies, activates the account
 igscrape list
-igscrape activate myuser           # usually auto-activated after first login
+```
+
+`add` alone does not make an account usable. It sets `active = bool(cookies)`,
+so an account added with only a username and password is inactive — and
+`get_available()` only hands out active accounts, so it would never be selected
+and never get its first login. `igscrape login` breaks that cycle: it targets
+the account **by name** (bypassing both the active gate and the
+`scroll_count_overall_24h ASC` ordering), then saves cookies and activates it.
+
+Have a human at the screen for a first login. Instagram commonly asks for 2FA
+or shows a challenge, which is why the browser is non-headless by default. If
+the account needs email/SMS verification, or has no stored password, log in by
+hand instead:
+
+```bash
+igscrape login myuser --mode manual --timeout 600
 ```
 
 Full CLI reference:
@@ -55,6 +71,8 @@ Full CLI reference:
 Account management:
   igscrape add --username U --password P [--email ...] [--proxy ...] [--cookies ...]
   igscrape add-from-file accounts.txt --format username:password
+  igscrape login <username>...      [--mode automatic|manual] [--no-headless]
+                                    [--timeout SECS] [--force]
   igscrape delete <username>...     [--all] [--inactive]
   igscrape list                     [--active] [--inactive] [-v]
   igscrape info <username>
