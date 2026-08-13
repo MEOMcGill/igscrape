@@ -1,13 +1,57 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+# >=77 for PEP 639 SPDX `license` / `license-files` support.
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "igscrape"
 version = "0.1.0"
-description = "Instagram scraping library with account management."
+description = "Async Instagram scraper for research: user timelines, profiles, posts, and keyword search, with a pooled logged-in account rotation."
 readme = "README.md"
 requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Ben Steel", email = "benjamin.steel@mcgill.ca" },
+    { name = "Mika Desblancs" },
+]
+maintainers = [
+    { name = "Media Ecosystem Observatory" },
+]
+keywords = [
+    "instagram",
+    "instagram-scraper",
+    "instagram-api",
+    "instagram-crawler",
+    "scraper",
+    "scraping",
+    "web-scraping",
+    "crawler",
+    "social-media",
+    "social-media-analysis",
+    "data-collection",
+    "computational-social-science",
+    "research",
+    "browser-automation",
+    "playwright",
+    "camoufox",
+    "osint",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     # Pinned as a pair: the Camoufox browser binary speaks a specific Playwright
     # protocol. Camoufox declares only an unbounded "playwright" dep, so without
@@ -31,6 +75,11 @@ dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/MEOMcGill/igscrape"
+Repository = "https://github.com/MEOMcGill/igscrape"
+Issues = "https://github.com/MEOMcGill/igscrape/issues"
 
 [project.scripts]
 igscrape = "igscrape.cli:main"
