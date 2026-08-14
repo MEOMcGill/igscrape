@@ -183,6 +183,12 @@ class Worker:
                 pass
             self.session = None
 
+    async def drop_session(self):
+        """Discard the browser session, keeping the account. _ensure_session
+        rebuilds it on the next task. Used when a scrape is abandoned mid-flight
+        and the session can't be assumed reusable."""
+        await self._close_session()
+
     async def execute_task(self, task: Query) -> ScrapingResult:
         """Run one task. Applies the IG result-code taxonomy to decide what
         to do on failure — retry (same or rotated account), rotate, or raise.

@@ -80,13 +80,43 @@ class WorkerPool:
             except asyncio.TimeoutError:
                 continue
 
+            if future.cancelled():
+                logger.info(f"{worker.id} skipping abandoned {query.endpoint} {query.query}")
+                self.task_queue.task_done()
+                continue
+
             logger.info(f"{worker.id} processing {query.endpoint} {query.query}")
+            # Run the scrape as its own task and tie it to the caller's future.
+            # A caller that gives up — asyncio.wait_for, or its own cancellation —
+            # cancels the future; awaiting execute_task directly left the scrape
+            # running, holding the browser, so every later task started on an
+            # occupied session and collected nothing.
+            task = asyncio.create_task(worker.execute_task(query))
+            abandoned = False
+
+            def _on_caller_gone(fut: asyncio.Future, t: asyncio.Task = task):
+                nonlocal abandoned
+                if fut.cancelled():
+                    abandoned = True
+                    t.cancel()
+
+            future.add_done_callback(_on_caller_gone)
             try:
-                result = await worker.execute_task(query)
-                future.set_result(result)
+                result = await task
+                if not future.done():
+                    future.set_result(result)
+            except asyncio.CancelledError:
+                if not abandoned:
+                    raise  # the pool is going down, not the caller giving up
+                logger.warning(
+                    f"{worker.id} abandoned {query.endpoint} {query.query} — "
+                    f"dropping the session so the next task starts clean"
+                )
+                await worker.drop_session()
             except Exception as e:
                 logger.error(f"{worker.id} task failed: {e}")
-                future.set_exception(e)
+                if not future.done():
+                    future.set_exception(e)
             finally:
                 self.task_queue.task_done()
 
