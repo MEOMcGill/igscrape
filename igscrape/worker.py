@@ -53,15 +53,17 @@ PARTIAL_CASES = {
 }
 
 
-def _handle_user_ids(handle: str, users: list[dict] | None) -> set[str]:
-    """Numeric ids belonging to `handle`, taken from the profile records captured
-    during the scrape.
+def _handle_user_records(handle: str, users: list[dict] | None) -> dict[str, dict]:
+    """Full profile records belonging to `handle`, keyed by numeric id, taken
+    from the profile records captured during the scrape.
 
     Needed because the profile-posts connection nulls each node's `user` and
-    identifies the author only by `owner_id`, so the authorship filter has to
-    match on id (see parsers.keep_record).
+    identifies the author only by `owner_id`. The id lets the authorship
+    filter match a node to `handle` (see parsers.keep_record); the full
+    record is what lets parsers.enrich_owner restore real user metadata on
+    that node instead of just proving an id.
     """
-    ids: set[str] = set()
+    by_id: dict[str, dict] = {}
     for user in users or []:
         if not isinstance(user, dict):
             continue
@@ -69,8 +71,8 @@ def _handle_user_ids(handle: str, users: list[dict] | None) -> set[str]:
             continue
         for key in ("id", "pk"):
             if user.get(key) is not None:
-                ids.add(str(user[key]))
-    return ids
+                by_id[str(user[key])] = user
+    return by_id
 
 
 # Rotation policy: rest after 100 handles
@@ -221,12 +223,14 @@ class Worker:
                         handle = task.query["handle"]
                         start = task.query["start_date"]
                         end = task.query["end_date"]
+                        user_records = _handle_user_records(handle, result.users)
                         result.posts = post_authorship_filterer(
                             handle,
                             post_date_filterer(
                                 post_flattener(result.posts), start, end
                             ),
-                            user_ids=_handle_user_ids(handle, result.users),
+                            user_ids=set(user_records),
+                            user_records=user_records,
                         )
                     # Search results aren't from one author, so only flatten —
                     # no authorship filter. Posts are already XDTMediaDict, so
