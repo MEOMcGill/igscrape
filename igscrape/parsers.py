@@ -114,16 +114,46 @@ def keep_record(record: dict, handle: str, user_ids: set[str] | None = None) -> 
     return False
 
 
+def enrich_owner(record: dict, user_records: dict[str, dict]) -> None:
+    """Fill a null `user` in place, from the profile matched by owner_id.
+
+    The profile-posts connection nulls `user` on every node; if the handle's
+    own profile load captured a full record for the matching numeric id (see
+    worker._handle_user_records), attach it here so the record keeps real
+    metadata (full_name, profile_pic_url, is_verified, ...) instead of
+    shipping with `user: null` — that null is what used to crash the phh
+    indexer's dashboard mapper, and even tolerated it loses everything but a
+    bare id downstream.
+    """
+    if record.get("user") is not None:
+        return
+    for oid in owner_ids(record):
+        match = user_records.get(oid)
+        if match is not None:
+            record["user"] = match
+            return
+
+
 def post_authorship_filterer(
-    handle: str, records: list[dict], user_ids: set[str] | None = None
+    handle: str,
+    records: list[dict],
+    user_ids: set[str] | None = None,
+    user_records: dict[str, dict] | None = None,
 ) -> list[dict]:
     """Keep only posts authored or coauthored by `handle`.
 
     `user_ids` are the numeric ids known to belong to `handle` (resolved by the
     caller from the profile record); they enable the `owner_id` fallback for
     nodes whose `user` came back null.
+
+    `user_records`, if given, additionally restores a kept record's null `user`
+    from the matched profile (see `enrich_owner`) so downstream consumers keep
+    real user metadata instead of losing it to Instagram's null.
     """
     filtered = [r for r in records if keep_record(r, handle, user_ids)]
+    if user_records:
+        for record in filtered:
+            enrich_owner(record, user_records)
     logger.debug(
         f"{len(records)} records before authorship filter, {len(filtered)} after"
     )

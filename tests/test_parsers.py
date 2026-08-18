@@ -1,6 +1,7 @@
 """Unit tests for igscrape.parsers authorship / date filtering."""
 
 from igscrape.parsers import (
+    enrich_owner,
     keep_record,
     owner_ids,
     post_authorship_filterer,
@@ -74,3 +75,43 @@ def test_date_filter_keeps_inclusive_range():
     kept = post_date_filterer([_profile_node(taken_at=mid)], "2026-06-01", "2026-06-09")
     assert len(kept) == 1
     assert post_date_filterer([_profile_node(taken_at=mid)], "2026-07-01", "2026-07-09") == []
+
+
+def test_enrich_owner_fills_null_user_from_the_matched_profile():
+    node = _profile_node(owner="2931777286")
+    profile = {"id": "2931777286", "pk": "2931777286", "username": "charest_isabelle", "full_name": "Isabelle Charest"}
+    enrich_owner(node, {"2931777286": profile})
+    assert node["user"] == profile
+
+
+def test_enrich_owner_does_not_touch_a_record_with_its_own_user():
+    existing = {"pk": "1", "username": "already_here"}
+    node = _profile_node(owner="2931777286", user=existing)
+    enrich_owner(node, {"2931777286": {"pk": "2931777286", "username": "charest_isabelle"}})
+    assert node["user"] is existing
+
+
+def test_enrich_owner_leaves_user_null_when_no_profile_matches():
+    node = _profile_node(owner="999")
+    enrich_owner(node, {"2931777286": {"pk": "2931777286", "username": "charest_isabelle"}})
+    assert node["user"] is None
+
+
+def test_authorship_filterer_enriches_kept_records_in_place():
+    """The end-to-end case: a profile-posts node with a null user comes out
+    of the filter carrying the real profile instead of losing it."""
+    records = [_profile_node(owner="2931777286")]
+    profile = {"id": "2931777286", "pk": "2931777286", "username": "charest_isabelle", "full_name": "Isabelle Charest"}
+    kept = post_authorship_filterer(
+        "charest_isabelle", records, user_ids={"2931777286"}, user_records={"2931777286": profile}
+    )
+    assert len(kept) == 1
+    assert kept[0]["user"] == profile
+
+
+def test_authorship_filterer_without_user_records_is_unchanged():
+    """Backward compatible: omitting user_records keeps the old null-user shape."""
+    records = [_profile_node(owner="2931777286")]
+    kept = post_authorship_filterer("charest_isabelle", records, user_ids={"2931777286"})
+    assert len(kept) == 1
+    assert kept[0]["user"] is None
