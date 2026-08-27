@@ -15,7 +15,7 @@ the same `_dispatch` branching as the live listener.
 import inspect
 import json
 import traceback
-from typing import Awaitable, Callable
+from collections.abc import Awaitable, Callable
 
 from playwright.async_api import Page, Request, Response
 

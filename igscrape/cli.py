@@ -389,7 +389,7 @@ def set_field(ctx, username, field, value):
             await pool.update_field(username, field, parsed)
             click.echo(f"Updated {username}: {field} = {parsed}")
         except ValueError as e:
-            raise click.UsageError(str(e))
+            raise click.UsageError(str(e)) from e
 
     run_async(_s())
 
@@ -638,7 +638,7 @@ def _load_result_posts_users(input_path: str) -> tuple[list[dict], list[dict]]:
         if first == "{":
             payload = json.load(f)
             return payload.get("posts", []), payload.get("users", [])
-        posts = [json.loads(l) for l in f if l.strip()]
+        posts = [json.loads(line) for line in f if line.strip()]
         return posts, []
 
 
@@ -803,7 +803,12 @@ def scrape_chaining(ctx, handles, output_dir, max_sessions, headless, mobile, lo
 
 @scrape.command("search")
 @click.argument("keywords", nargs=-1, required=True)
-@click.option("--max-posts", default=-1, type=int, help="Stop after collecting this many posts (-1 = no limit)")
+@click.option(
+    "--max-posts",
+    default=-1,
+    type=int,
+    help="Stop after collecting this many posts (-1 = no limit)",
+)
 @click.option("--output-dir", default=None)
 @click.option("--max-sessions", default=2, type=int)
 @click.option("--headless", is_flag=True)

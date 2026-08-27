@@ -137,7 +137,8 @@ class AccountsPool:
             qs = "UPDATE accounts SET locks = json_object()"
         else:
             usernames = username if isinstance(username, list) else [username]
-            qs = f"UPDATE accounts SET locks = json_object() WHERE {self._ids_cond(list(set(usernames)))}"
+            cond = self._ids_cond(list(set(usernames)))
+            qs = f"UPDATE accounts SET locks = json_object() WHERE {cond}"
         await execute(self._db_file, qs)
         logger.info(f"Reset locks for {username if username else 'all accounts'}")
 
@@ -166,7 +167,10 @@ class AccountsPool:
         )
 
     async def lock_until(self, username: str | list[str] | None, until: str):
-        """Lock account(s) until given SQLite datetime expression (e.g. "datetime('now', '+15 minutes')")."""
+        """Lock account(s) until a given SQLite datetime expression.
+
+        e.g. until="datetime('now', '+15 minutes')"
+        """
         usernames = username if isinstance(username, list) else [username] if username else []
         if not usernames:
             where = "TRUE"
@@ -323,7 +327,9 @@ class AccountsPool:
             scroll_count_per_endpoint_total = json_set(
                 scroll_count_per_endpoint_total,
                 '$.{endpoint}',
-                COALESCE(json_extract(scroll_count_per_endpoint_total, '$.{endpoint}'), 0) + :increment
+                COALESCE(
+                    json_extract(scroll_count_per_endpoint_total, '$.{endpoint}'), 0
+                ) + :increment
             ),
             scroll_count_overall_24h = scroll_count_overall_24h + :increment,
             last_used = datetime({utc.ts()}, 'unixepoch')
@@ -338,7 +344,10 @@ class AccountsPool:
                 f"FROM accounts WHERE {self._id_cond(username)}"
             )
         else:
-            qs = f"SELECT scroll_count_overall_24h AS count FROM accounts WHERE {self._id_cond(username)}"
+            qs = (
+                "SELECT scroll_count_overall_24h AS count "
+                f"FROM accounts WHERE {self._id_cond(username)}"
+            )
         rs = await fetchone(self._db_file, qs)
         return (rs["count"] or 0) if rs else 0
 
@@ -348,7 +357,8 @@ class AccountsPool:
         if endpoint:
             base = (
                 "UPDATE accounts SET "
-                f"scroll_count_per_endpoint_total = json_remove(scroll_count_per_endpoint_total, '$.{endpoint}')"
+                "scroll_count_per_endpoint_total = "
+                f"json_remove(scroll_count_per_endpoint_total, '$.{endpoint}')"
             )
             qs = base if username is None else f"{base} WHERE {self._id_cond(username)}"
         else:

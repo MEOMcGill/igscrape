@@ -10,7 +10,13 @@ from igscrape.exporter import flatten_paths, load_posts, write_jsonl
 
 
 def _post(pk):
-    return {"id": pk, "pk": pk, "code": f"c{pk}", "taken_at": 1700000000, "__typename": "XDTMediaDict"}
+    return {
+        "id": pk,
+        "pk": pk,
+        "code": f"c{pk}",
+        "taken_at": 1700000000,
+        "__typename": "XDTMediaDict",
+    }
 
 
 # ---- load_posts: format detection --------------------------------------------
@@ -123,4 +129,4 @@ def test_flatten_multiple_files_reject_file_output(tmp_path):
 def test_write_jsonl_roundtrip(tmp_path):
     out = tmp_path / "x.jsonl"
     write_jsonl([{"a": 1}, {"a": 2}], out)
-    assert [json.loads(l)["a"] for l in out.read_text().splitlines()] == [1, 2]
+    assert [json.loads(line)["a"] for line in out.read_text().splitlines()] == [1, 2]

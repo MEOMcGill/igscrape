@@ -147,7 +147,9 @@ def test_parse_response_status_fail_becomes_error():
 
 
 def test_errors_indicate_rate_limit():
-    assert errors_indicate_rate_limit([{"message": "Please wait a few minutes before you try again."}])
+    assert errors_indicate_rate_limit(
+        [{"message": "Please wait a few minutes before you try again."}]
+    )
     assert not errors_indicate_rate_limit([{"message": "some other error"}])
 
 
