@@ -8,9 +8,9 @@ import asyncio
 import inspect
 import random
 import re
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable, Optional
 from urllib.parse import quote
 
 from camoufox.async_api import AsyncNewBrowser
@@ -20,9 +20,11 @@ from playwright.async_api import (
     Locator,
     Page,
     Playwright,
-    TimeoutError as PWTimeoutError,
     async_playwright,
     expect,
+)
+from playwright.async_api import (
+    TimeoutError as PWTimeoutError,
 )
 
 from .account import Account
@@ -108,11 +110,11 @@ class BrowserSession:
         self.auto_login = auto_login
         self.endpoint: str = ""
 
-        self._pw: Optional[Playwright] = None
-        self._browser: Optional[Browser] = None
-        self._context: Optional[BrowserContext] = None
-        self.page: Optional[Page] = None
-        self.response_interceptor: Optional[InstagramResponseInterceptor] = None
+        self._pw: Playwright | None = None
+        self._browser: Browser | None = None
+        self._context: BrowserContext | None = None
+        self.page: Page | None = None
+        self.response_interceptor: InstagramResponseInterceptor | None = None
 
     async def __aenter__(self):
         await self.initialize()
@@ -979,7 +981,8 @@ class BrowserSession:
 
         # Still return success if the profile at least loaded — chaining
         # XHR does not always fire.
-        return _result("success" if self.response_interceptor.user_metadata_list else "timeout error")
+        loaded = bool(self.response_interceptor.user_metadata_list)
+        return _result("success" if loaded else "timeout error")
 
     # ==================== Scraping: search ====================
 

@@ -23,7 +23,7 @@ def test_save_infers_jsonl_from_extension(tmp_path):
     _result().save(str(p))
     lines = p.read_text().splitlines()
     assert len(lines) == 2
-    assert [json.loads(l)["pk"] for l in lines] == ["1", "2"]
+    assert [json.loads(line)["pk"] for line in lines] == ["1", "2"]
 
 
 def test_save_jsonl_flag_overrides_extension(tmp_path):

@@ -73,7 +73,8 @@ def flatten_post(post: dict) -> dict:
     caption = post.get("caption") or {}
     location = post.get("location") or {}
     coauthors = post.get("coauthor_producers") or []
-    tagged = [t.get("user", {}).get("username") for t in (post.get("usertags") or {}).get("in") or []]
+    usertags = (post.get("usertags") or {}).get("in") or []
+    tagged = [t.get("user", {}).get("username") for t in usertags]
     num_images, num_videos = _count_images_videos(post)
 
     media_type_map = {1: "photo", 2: "video", 8: "carousel"}
@@ -185,7 +186,7 @@ def export_posts(input_path: str | Path, output_path: str | Path) -> int:
 def _open_maybe_gz(path: str):
     if str(path).endswith(".gz"):
         return gzip.open(path, "rt", encoding="utf-8")
-    return open(path, "r", encoding="utf-8")
+    return open(path, encoding="utf-8")
 
 
 def load_posts(path: str | Path) -> list[dict]:
