@@ -6,8 +6,10 @@ Python or the command line. `igscrape` drives real logged-in browser sessions
 responses instead of parsing HTML, and rotates through a pool of accounts so long
 collection runs survive rate limits, challenges, and crashes.
 
+[![CI](https://github.com/MEOMcGill/igscrape/actions/workflows/ci.yml/badge.svg)](https://github.com/MEOMcGill/igscrape/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![Ruff](https://img.shields.io/badge/lint-ruff-261230.svg)](https://github.com/astral-sh/ruff)
 
 Built and maintained at the [Media Ecosystem Observatory](https://www.mediaecosystemobservatory.com/)
 for social-media research. Sibling project: [pytok](https://github.com/networkdynamics/pytok),
@@ -248,6 +250,18 @@ igscrape/
 examples/                 # runnable scripts per endpoint
 tests/                    # pytest suite (pytest -q)
 ```
+
+## Development
+
+```bash
+uv sync --extra dev
+uv run pytest        # unit tests: no browser, no network, no accounts
+uv run ruff check .  # lint
+```
+
+CI runs both on Python 3.10 through 3.13. `tests/` is offline by
+construction; `examples/` holds runnable demos that do hit Instagram, and
+pytest does not collect them.
 
 ## Responsible use
 
