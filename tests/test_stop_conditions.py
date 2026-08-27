@@ -14,19 +14,19 @@ from igscrape.stop_conditions import (
 
 
 def _state(**overrides):
-    base = dict(
-        iter_index=1,
-        cursor_sent="CUR",
-        end_cursor="CUR2",
-        has_next_page=True,
-        new_count=5,
-        all_count=10,
-        oldest_in_batch_unix=1700000000,
-        timestamped_count=5,
-        error=None,
-        start_unix=1600000000,
-        no_progress_streak=0,
-    )
+    base = {
+        "iter_index": 1,
+        "cursor_sent": "CUR",
+        "end_cursor": "CUR2",
+        "has_next_page": True,
+        "new_count": 5,
+        "all_count": 10,
+        "oldest_in_batch_unix": 1700000000,
+        "timestamped_count": 5,
+        "error": None,
+        "start_unix": 1600000000,
+        "no_progress_streak": 0,
+    }
     base.update(overrides)
     return StopState(**base)
 

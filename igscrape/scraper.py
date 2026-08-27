@@ -12,8 +12,8 @@ Usage:
 """
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Awaitable, Callable
 
 from .accounts_pool import AccountsPool
 from .browser_session import SEARCH_NO_PROGRESS_STREAK

@@ -7,7 +7,6 @@ wiring — account targeting, auto_login mode, cookie save, activation, the
 in_use guard and exit codes — without a browser or Instagram.
 """
 
-import click
 import pytest
 from click.testing import CliRunner
 

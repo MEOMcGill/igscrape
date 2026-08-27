@@ -32,7 +32,9 @@ async def main(handle: str):
 
     async with InstagramScraper(headless=False, max_browser_sessions=1) as scraper:
         # Reach into the worker's session after the run to inspect the template.
-        result = await scraper.user_timeline(handle=handle, start_date=start_date, end_date=end_date)
+        result = await scraper.user_timeline(
+            handle=handle, start_date=start_date, end_date=end_date
+        )
 
     print("\n==== capture-replay spike ====")
     print(f"handle:      {handle}")
@@ -47,7 +49,8 @@ async def main(handle: str):
     if result.posts:
         sample = result.posts[0]
         print(f"sample post keys: {sorted(sample.keys())[:15]}")
-        print(f"sample taken_at:  {sample.get('taken_at') or sample.get('media', {}).get('taken_at')}")
+        taken_at = sample.get("taken_at") or sample.get("media", {}).get("taken_at")
+        print(f"sample taken_at:  {taken_at}")
 
     # Demonstrate strategy selection on a synthetic GraphQL-shaped template so
     # the chosen branch is visible even if capture failed.

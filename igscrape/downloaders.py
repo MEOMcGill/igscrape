@@ -61,7 +61,9 @@ async def _fetch_bytes(
     backoff = 5
     for attempt in range(max_retries + 1):
         try:
-            async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+            async with session.get(
+                url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=60)
+            ) as resp:
                 if resp.status == 200:
                     return await resp.read()
                 logger.warning(f"fetch {url} returned status {resp.status}")

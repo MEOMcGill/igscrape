@@ -5,7 +5,7 @@ Retry/rotate/crash behavior follows the result-code taxonomy
 """
 
 import asyncio
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from .account import Account
 from .accounts_pool import AccountsPool
@@ -105,14 +105,14 @@ class Worker:
         self.headless = headless
         self.mobile = mobile
 
-        self.current_account: Optional[Account] = None
+        self.current_account: Account | None = None
         self.handles_scraped: int = 0
         self._initialized = False
         # Persistent browser session, reused across tasks for the lifetime of
         # the current account. Recreated on rotation / crash / logout. Callers
         # who want a fresh browser per handle should instead recreate the
         # InstagramScraper per handle (one worker => one session here).
-        self.session: Optional[BrowserSession] = None
+        self.session: BrowserSession | None = None
 
     @classmethod
     async def create(

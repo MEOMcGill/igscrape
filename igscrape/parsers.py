@@ -106,7 +106,9 @@ def keep_record(record: dict, handle: str, user_ids: set[str] | None = None) -> 
         return True
 
     for coauthor in record.get("coauthor_producers") or []:
-        if isinstance(coauthor, dict) and (coauthor.get("username") or "").lower() == handle.lower():
+        if not isinstance(coauthor, dict):
+            continue
+        if (coauthor.get("username") or "").lower() == handle.lower():
             return True
 
     if not author and user_ids and owner_ids(record) & {str(u) for u in user_ids}:
