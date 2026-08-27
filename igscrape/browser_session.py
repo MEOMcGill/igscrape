@@ -55,6 +55,13 @@ BASE_URL = "https://www.instagram.com/"
 REPLAY_TIMEOUT_MS = 30000
 FINGERPRINT_EVERY = 50
 
+# How many consecutive all-duplicate pages end a keyword search. The SERP tail is
+# sparse and bursty -- pages that add nothing are routinely followed by pages that
+# do -- so this is a guess at where "sparse" becomes "over", not a signal from
+# Instagram. Raise it to collect deeper at the cost of more replays per keyword;
+# EndOfFeed still stops a search that genuinely runs out.
+SEARCH_NO_PROGRESS_STREAK = 5
+
 # Post/reel anchor detection for the grid-render poll (_wait_for_first_post).
 # Matches /<user>/p/<code>/ and /<user>/reel/<code>/ (main's f9b8f5b).
 _POST_HREF_RE = re.compile(r"^/[A-Za-z0-9_.-]+/(?:p|reel)/[A-Za-z0-9_.-]+/?$")
@@ -1142,6 +1149,8 @@ class BrowserSession:
         self,
         keyword: str,
         max_posts: int = -1,
+        max_no_progress_streak: int = SEARCH_NO_PROGRESS_STREAK,
+        page_count: int = DEFAULT_PAGE_COUNT,
         on_new_posts: Callable[[list[dict]], None | Awaitable[None]] | None = None,
         download_videos: bool = False,
         video_dir: str | Path | None = None,
@@ -1153,6 +1162,11 @@ class BrowserSession:
         advancing cursor. Search results aren't reliably chronological, so there
         is no date cutoff — collection stops on `max_posts`, end-of-feed, or a
         no-progress streak (see stop_conditions).
+
+        `max_no_progress_streak` is how deep to keep going through all-duplicate
+        pages, and is usually what ends a broad keyword: the SERP keeps offering
+        `has_next_page` long after it has stopped yielding much. `page_count` is
+        how many results each replay asks for.
 
         Streaming options (jsonl_path / on_new_posts / download_videos +
         video_dir) behave exactly as in user_timeline.
@@ -1198,7 +1212,8 @@ class BrowserSession:
         params = {
             "max_posts": max_posts,
             "max_paginations": 2000,
-            "max_no_progress_streak": 5,
+            "max_no_progress_streak": max_no_progress_streak,
+            "page_count": page_count,
         }
         strategy = select_cursor_strategy(template)
         conditions = assemble_default_stop_conditions("Search", params)

@@ -196,3 +196,16 @@ def test_assemble_search_omits_date_cutoff():
     names = [type(c).__name__ for c in assemble_default_stop_conditions("Search", {})]
     assert "OldestInBatchBelowStartDate" not in names
     assert "MaxPostsReached" in names
+
+
+def test_assemble_search_honours_configured_no_progress_streak():
+    """The streak cap is what actually ends most keyword searches, so a caller
+    raising it must reach the assembled condition rather than the default."""
+    conditions = assemble_default_stop_conditions(
+        "Search", {"max_no_progress_streak": 25}
+    )
+    streak = next(c for c in conditions if isinstance(c, NoNewPostsStreak))
+    assert streak.max_streak == 25
+    # A tail that goes quiet for longer than the old default no longer stops.
+    assert streak.evaluate(_state(no_progress_streak=5)) is None
+    assert streak.evaluate(_state(no_progress_streak=25)) is not None
