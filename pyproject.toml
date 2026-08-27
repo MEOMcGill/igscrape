@@ -87,3 +87,7 @@ igscrape = "igscrape.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["igscrape*"]
+
+[tool.pytest.ini_options]
+# Confine collection to tests/; examples/ holds runnable demos, not tests.
+testpaths = ["tests"]
