@@ -9,9 +9,9 @@ import copy
 import inspect
 import random
 import re
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable, Optional
 from urllib.parse import quote
 
 from camoufox.async_api import AsyncNewBrowser
@@ -21,9 +21,11 @@ from playwright.async_api import (
     Locator,
     Page,
     Playwright,
-    TimeoutError as PWTimeoutError,
     async_playwright,
     expect,
+)
+from playwright.async_api import (
+    TimeoutError as PWTimeoutError,
 )
 
 from .account import Account
@@ -98,18 +100,24 @@ class BrowserSession:
         pool: AccountsPool,
         headless: bool = False,
         mobile: bool = False,
+        auto_login: bool = True,
     ):
         self.account = account
         self.pool = pool
         self.headless = headless
         self.mobile = mobile
+        # When False, initialize() brings the browser up and lands on
+        # instagram.com but does NOT reauth or form-fill — the caller drives
+        # login itself. Used by `igscrape login --mode manual`, where a human
+        # logs in by hand (mirrors fbscrape's BrowserSession(auto_login=...)).
+        self.auto_login = auto_login
         self.endpoint: str = ""
 
-        self._pw: Optional[Playwright] = None
-        self._browser: Optional[Browser] = None
-        self._context: Optional[BrowserContext] = None
-        self.page: Optional[Page] = None
-        self.response_interceptor: Optional[InstagramResponseInterceptor] = None
+        self._pw: Playwright | None = None
+        self._browser: Browser | None = None
+        self._context: BrowserContext | None = None
+        self.page: Page | None = None
+        self.response_interceptor: InstagramResponseInterceptor | None = None
 
         # Session-level replay seed: the cursor-bearing, username-keyed
         # profile-posts query (PolarisProfilePostsTabContentQuery_connection),
@@ -119,7 +127,7 @@ class BrowserSession:
         # resolution (replay with `after=null` -> page 1 owner) and full timeline
         # pagination. Survives interceptor.flush() (which is per-scrape).
         # Shape: {"template": <captured>, "seed_username": str}.
-        self._timeline_seed: Optional[dict] = None
+        self._timeline_seed: dict | None = None
 
     async def __aenter__(self):
         await self.initialize()
@@ -179,6 +187,13 @@ class BrowserSession:
         await self.page.goto(BASE_URL, wait_until="domcontentloaded")
         # Wait 10s after the initial goto to let the page settle
         await asyncio.sleep(10)
+
+        if not self.auto_login:
+            logger.info(
+                f"Browser session ready for {self.account.username} "
+                f"(auto_login=False — caller drives login)"
+            )
+            return
 
         await self._handle_continue_reauth()
 
@@ -374,6 +389,42 @@ class BrowserSession:
     async def _save_cookies(self):
         storage = await self._context.storage_state()
         await self.pool.update_cookies(self.account.username, storage["cookies"])
+
+    async def save_cookies(self) -> int:
+        """Persist the context's cookies to the pool and return how many were
+        written. Public counterpart to `_save_cookies`, for callers that drive
+        login themselves (`igscrape login --mode manual`) and so never go
+        through `login()`'s own save. Mirrors fbscrape's
+        `BrowserSession.save_cookies`."""
+        storage = await self._context.storage_state()
+        cookies = storage["cookies"]
+        await self.pool.update_cookies(self.account.username, cookies)
+        return len(cookies)
+
+    async def wait_until_logged_in(self, timeout: float = 300.0, poll: float = 5.0) -> bool:
+        """Poll until the session looks logged in, or `timeout` elapses.
+
+        For the manual login flow: a human completes the form, 2FA and any
+        challenge in the visible browser while this polls. Deliberately not an
+        stdin prompt — this command is normally driven over SSH through
+        `powershell -Command`, where there is no usable interactive TTY to type
+        'continue' into.
+        """
+        waited = 0.0
+        while waited < timeout:
+            try:
+                if not await self._need_to_log_in():
+                    return True
+            except Exception as e:
+                logger.debug(f"login check failed, retrying: {e}")
+            await asyncio.sleep(poll)
+            waited += poll
+            if waited % 30 < poll:
+                logger.info(
+                    f"still waiting for manual login "
+                    f"({int(waited)}s/{int(timeout)}s) — finish in the browser window"
+                )
+        return False
 
     # ==================== Helpers ====================
 
@@ -1066,7 +1117,8 @@ class BrowserSession:
 
         # Still return success if the profile at least loaded — chaining
         # XHR does not always fire.
-        return _result("success" if self.response_interceptor.user_metadata_list else "timeout error")
+        loaded = bool(self.response_interceptor.user_metadata_list)
+        return _result("success" if loaded else "timeout error")
 
     # ==================== Scraping: search ====================
 

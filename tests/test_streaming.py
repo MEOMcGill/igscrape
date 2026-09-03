@@ -14,7 +14,7 @@ def test_append_jsonl_one_object_per_line(tmp_path):
     append_jsonl([], path)  # no-op
 
     lines = path.read_text().splitlines()
-    assert [json.loads(l)["pk"] for l in lines] == ["1", "2", "3"]
+    assert [json.loads(line)["pk"] for line in lines] == ["1", "2", "3"]
 
 
 def test_append_jsonl_is_append_mode(tmp_path):
