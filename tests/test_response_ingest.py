@@ -179,3 +179,62 @@ def test_has_post_connection_false_for_unrelated_payload():
 
 def test_has_post_connection_true_for_search_serp():
     assert has_post_connection([{"xdt_fbsearch__top_serp_graphql": {"edges": []}}])
+
+
+# ---- profile-info template capture + chaining gating ----
+
+
+_PROFILE_DATA = {"user": {"username": "natgeo", "follower_count": 1}, "viewer": {}}
+
+
+def test_captures_the_profile_info_query_as_its_own_template():
+    interceptor = InstagramResponseInterceptor()
+    req = _FakeRequest(
+        "https://www.instagram.com/api/graphql",
+        {"doc_id": "28036671149327607", "variables": json.dumps({"id": "787132"})},
+        {"x-fb-friendly-name": "PolarisProfilePageContentQuery"},
+    )
+    asyncio.run(interceptor._capture_request(req, _PROFILE_DATA))
+    assert interceptor.templates["profile_info"]["doc_id"] == "28036671149327607"
+    assert interceptor.templates["profile_info"]["variables"]["id"] == "787132"
+
+
+def test_profile_info_capture_needs_an_id_to_retarget():
+    interceptor = InstagramResponseInterceptor()
+    req = _FakeRequest(
+        "https://www.instagram.com/api/graphql",
+        {"doc_id": "1", "variables": json.dumps({"username": "natgeo"})},
+        {},
+    )
+    asyncio.run(interceptor._capture_request(req, _PROFILE_DATA))
+    assert "profile_info" not in interceptor.templates
+
+
+def _chaining(usernames):
+    return {
+        "xdt_api__v1__discover__chaining": {
+            "users": [{"username": u, "pk": u} for u in usernames]
+        }
+    }
+
+
+def test_suggested_users_are_ignored_outside_the_chaining_endpoint():
+    # The carousel fires on any profile page load; its users are not the handle
+    # being scraped.
+    interceptor = InstagramResponseInterceptor()
+    interceptor.ingest_payloads([_chaining(["a", "b"])])
+    assert interceptor.user_metadata_list == []
+
+
+def test_chaining_endpoint_still_collects_suggested_users():
+    interceptor = InstagramResponseInterceptor()
+    interceptor.collect_chaining_users = True
+    interceptor.ingest_payloads([_chaining(["a", "b"])])
+    assert [u["username"] for u in interceptor.user_metadata_list] == ["a", "b"]
+
+
+def test_flush_clears_the_chaining_opt_in():
+    interceptor = InstagramResponseInterceptor()
+    interceptor.collect_chaining_users = True
+    interceptor.flush()
+    assert interceptor.collect_chaining_users is False

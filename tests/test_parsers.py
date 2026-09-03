@@ -79,7 +79,10 @@ def test_date_filter_keeps_inclusive_range():
 
 def test_enrich_owner_fills_null_user_from_the_matched_profile():
     node = _profile_node(owner="2931777286")
-    profile = {"id": "2931777286", "pk": "2931777286", "username": "charest_isabelle", "full_name": "Isabelle Charest"}
+    profile = {
+        "id": "2931777286", "pk": "2931777286",
+        "username": "charest_isabelle", "full_name": "Isabelle Charest",
+    }
     enrich_owner(node, {"2931777286": profile})
     assert node["user"] == profile
 
@@ -101,7 +104,10 @@ def test_authorship_filterer_enriches_kept_records_in_place():
     """The end-to-end case: a profile-posts node with a null user comes out
     of the filter carrying the real profile instead of losing it."""
     records = [_profile_node(owner="2931777286")]
-    profile = {"id": "2931777286", "pk": "2931777286", "username": "charest_isabelle", "full_name": "Isabelle Charest"}
+    profile = {
+        "id": "2931777286", "pk": "2931777286",
+        "username": "charest_isabelle", "full_name": "Isabelle Charest",
+    }
     kept = post_authorship_filterer(
         "charest_isabelle", records, user_ids={"2931777286"}, user_records={"2931777286": profile}
     )
