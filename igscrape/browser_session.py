@@ -129,6 +129,15 @@ class BrowserSession:
         # Shape: {"template": <captured>, "seed_username": str}.
         self._timeline_seed: dict | None = None
 
+        # Session-level replay seed for the profile-info query
+        # (PolarisProfilePageContentQuery), harvested from the same seed
+        # navigation. It is the only query that returns the rich user record
+        # (follower/following/media counts, biography, category, bio_links), and
+        # it is keyed by the numeric user id — so a handle is enriched only once
+        # the posts query has resolved its id. Shape:
+        # {"template": <captured>, "seed_username": str, "seed_user_id": str}.
+        self._profile_seed: dict | None = None
+
     async def __aenter__(self):
         await self.initialize()
         return self
@@ -817,20 +826,33 @@ class BrowserSession:
             )
             return None, "profile is not available"
 
-        self.response_interceptor.user_metadata_list.append(owner)
-        return owner, None
+        # Enrich with the rich record now that the handle has a numeric id.
+        rich = await self._enrich_profile(
+            handle, str(owner.get("pk") or owner.get("id") or "")
+        )
+        record = rich or owner
+        self.response_interceptor.user_metadata_list.append(record)
+        return record, None
 
     def _classify_profile(self, user: dict) -> str | None:
         """Map a profile record to an availability code, or None if its timeline
-        is scrapeable. Safe on both record shapes: the rich record captured on a
-        seed navigation carries `followed_by_viewer` + `edge_owner_to_timeline_media`,
-        while an owner lifted from a replayed post carries neither — and its very
-        presence already proves the timeline is visible, so a missing field means
-        'scrapeable', not 'private'."""
-        if user.get("is_private") and user.get("followed_by_viewer") is False:
-            return "account is private"
+        is scrapeable.
+
+        Safe on every record shape we get: the rich profile-info record states
+        privacy as `is_private` + `friendship_status.following` and its post
+        count as `media_count`, older web_profile_info records used
+        `followed_by_viewer` + `edge_owner_to_timeline_media`, and an owner
+        lifted from a replayed post carries neither — its very presence already
+        proves the timeline is visible, so a missing field means 'scrapeable',
+        not 'private'."""
+        if user.get("is_private"):
+            following = (user.get("friendship_status") or {}).get("following")
+            if user.get("followed_by_viewer") is False or following is False:
+                return "account is private"
         media = user.get("edge_owner_to_timeline_media")
         if isinstance(media, dict) and media.get("count") == 0:
+            return "no posts"
+        if user.get("media_count") == 0:
             return "no posts"
         return None
 
@@ -862,7 +884,94 @@ class BrowserSession:
                 "template": copy.deepcopy(timeline_tmpl),
                 "seed_username": handle,
             }
+        self._capture_profile_seed(handle)
         return user, True
+
+    def _capture_profile_seed(self, handle: str):
+        """Stash the profile-info template harvested by the navigation just made.
+        Fires on page load, so it lands even for a private or zero-post profile
+        (which never provokes the paginating timeline query)."""
+        if self._profile_seed is not None:
+            return
+        template = self.response_interceptor.templates.get("profile_info")
+        if template is None:
+            return
+        seed_user_id = (template.get("variables") or {}).get("id")
+        if not seed_user_id:
+            return
+        self._profile_seed = {
+            "template": copy.deepcopy(template),
+            "seed_username": handle,
+            "seed_user_id": str(seed_user_id),
+        }
+        logger.debug(f"captured profile_info seed from @{handle} (id={seed_user_id})")
+
+    async def _enrich_profile(self, handle: str, user_id: str) -> dict | None:
+        """The rich profile record for an already-resolved numeric id, by
+        replaying the captured profile-info query with that id swapped in — no
+        page load.
+
+        The posts query that resolves a handle only ever yields the post owner
+        (id, username, is_private, full_name); follower counts, biography and
+        category live solely in this query's `data['user']`. It is keyed by the
+        numeric id, which is why it runs as a second step rather than as the
+        resolver: only the username-keyed posts query can turn a handle into an
+        id. Returns None (leaving the caller with the thin record) when the
+        template was never captured or the reply isn't this handle's."""
+        seed = self._profile_seed
+        if seed is None or not user_id:
+            return None
+        template = substitute_identity(
+            seed["template"], seed["seed_username"], seed["seed_user_id"],
+            handle, user_id, reset_cursor=False,
+        )
+        body = build_replay_body(
+            template, None, DEFAULT_PAGE_COUNT, StaticStrategy(),
+            latest_form=self.response_interceptor.latest_request_form,
+        )
+        headers = merge_header_tokens(
+            template["headers"], self.response_interceptor.latest_request_headers
+        )
+        text, err = await self._send_replay(template, body, headers)
+        if text is None:
+            logger.debug(f"profile enrichment for @{handle} failed: {err}")
+            return None
+
+        payloads, errors = parse_response(text)
+        if errors and errors_indicate_rate_limit(errors):
+            raise RateLimitError("; ".join(str(e.get("message")) for e in errors))
+
+        rich = None
+        for data in payloads:
+            if isinstance(data, dict) and isinstance(data.get("user"), dict):
+                rich = data["user"]
+        if rich is None:
+            return None
+        if str(rich.get("username", "")).lower() != handle.lower():
+            logger.warning(
+                f"profile enrichment for @{handle} returned @{rich.get('username')}; "
+                "keeping the thin record"
+            )
+            return None
+        return rich
+
+    async def _profile_via_navigation(self, handle: str) -> dict | None:
+        """Load the profile page and take the rich record the profile-info query
+        fires on load. The fallback for handles the replay path can't enrich: a
+        private or postless account never yields a post owner, so its numeric id
+        — the key the profile-info query needs — is never learned."""
+        try:
+            await self._goto(f"{BASE_URL}{handle}/")
+        except PWTimeoutError:
+            return None
+        for _ in range(15):
+            user = self._passive_user(handle)
+            if user is not None and str(user.get("username", "")).lower() == handle.lower():
+                self._capture_profile_seed(handle)
+                return user
+            await asyncio.sleep(1.0)
+        logger.debug(f"no profile record rendered for @{handle}")
+        return None
 
     async def _resolve_or_seed_profile(
         self, handle: str
@@ -996,9 +1105,14 @@ class BrowserSession:
         The first lookup of a session seeds the query template with one profile
         navigation (and picks up that handle's record passively); every later
         lookup replays the captured query with the username swapped in — no page
-        load, and no bare web_profile_info REST call (which Instagram 429s). The
-        returned record is the post owner (id, username, is_private, full_name);
-        rich fields like follower counts are not exposed by this query."""
+        load, and no bare web_profile_info REST call (which Instagram 429s).
+
+        The record returned is the rich one — follower/following/media counts,
+        biography, category, bio_links — obtained by resolving the handle to its
+        numeric id and then replaying the id-keyed profile-info query
+        (_enrich_profile). A private or postless account exposes no id that way,
+        so it falls back to a single navigation, which is the only thing that
+        will ever produce a record for those handles."""
         self.endpoint = "UserProfile"
         self.response_interceptor.flush()
         start_time = datetime.now(timezone.utc)
@@ -1015,9 +1129,17 @@ class BrowserSession:
             )
 
         user, code = await self._resolve_or_seed_profile(handle)
+        if user is None and code in ("account is private", "profile is not available"):
+            # No id was resolved, so the page itself is the only source of a
+            # record — and it also re-judges the verdict the empty timeline gave
+            # (a postless account reads as unavailable there).
+            user = await self._profile_via_navigation(handle)
         if user is None:
             return _result(code or "profile is not available")
-        return _result("success")
+        # The record, not the route that found it, decides the code: every path
+        # here has one, so private / postless accounts report as such and still
+        # carry their profile.
+        return _result(self._classify_profile(user) or "success")
 
     # ==================== Scraping: post_by_shortcode ====================
 
@@ -1073,6 +1195,7 @@ class BrowserSession:
         """
         self.endpoint = "Chaining"
         self.response_interceptor.flush()
+        self.response_interceptor.collect_chaining_users = True
         start_time = datetime.now(timezone.utc)
         query = Query(endpoint="Chaining", query={"handle": handle}, params={})
 
