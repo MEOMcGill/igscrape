@@ -1,10 +1,15 @@
-"""Unit tests for the web_profile_info availability classifier.
+"""Unit tests for the profile availability classifier and the rich-record
+enrichment replay.
 
-`_classify_profile` is a pure mapping from a web_profile_info `user` record to
-an availability result code (or None when the timeline is scrapeable). It reads
-no instance state, so we exercise it as an unbound method with a dummy self —
-no browser required.
+`_classify_profile` is a pure mapping from a profile `user` record to an
+availability result code (or None when the timeline is scrapeable). It reads no
+instance state, so we exercise it as an unbound method with a dummy self — no
+browser required, and the same trick serves `_enrich_profile` with a stub.
 """
+
+import asyncio
+import json
+import types
 
 from igscrape.browser_session import BrowserSession
 
@@ -84,3 +89,100 @@ def test_owner_without_handle_omits_username():
     owner = BrowserSession._owner_from_payloads(_conn([_null_user_node()]))
     assert owner["pk"] == "2931777286"
     assert "username" not in owner
+
+
+# ---- the rich profile-info record shape (PolarisProfilePageContentQuery) ----
+
+
+def test_rich_record_private_and_not_following_is_account_private():
+    user = {
+        "is_private": True,
+        "friendship_status": {"following": False},
+        "media_count": 12,
+        "follower_count": 300,
+    }
+    assert _classify(user) == "account is private"
+
+
+def test_rich_record_private_but_following_is_scrapeable():
+    user = {
+        "is_private": True,
+        "friendship_status": {"following": True},
+        "media_count": 12,
+    }
+    assert _classify(user) is None
+
+
+def test_rich_record_zero_media_count_is_no_posts():
+    assert _classify({"is_private": False, "media_count": 0}) == "no posts"
+
+
+def test_rich_record_public_with_posts_is_scrapeable():
+    assert _classify({"is_private": False, "media_count": 12}) is None
+
+
+# ---- _enrich_profile: replaying the id-keyed profile-info query ----
+
+
+def _stub_session(reply, seed=True):
+    """A BrowserSession stand-in exposing only what _enrich_profile touches."""
+    sent = {}
+
+    async def _send_replay(template, body, headers):
+        sent["template"] = template
+        return reply, None
+
+    return types.SimpleNamespace(
+        _profile_seed={
+            "template": {
+                "url": "https://www.instagram.com/api/graphql",
+                "headers": {"x-csrftoken": "t"},
+                "form": {"doc_id": "1", "variables": json.dumps({"id": "787132"})},
+                "variables": {"id": "787132"},
+                "_has_cursor": False,
+            },
+            "seed_username": "natgeo",
+            "seed_user_id": "787132",
+        }
+        if seed
+        else None,
+        response_interceptor=types.SimpleNamespace(
+            latest_request_form=None, latest_request_headers=None
+        ),
+        _send_replay=_send_replay,
+    ), sent
+
+
+def _enrich(session, handle, uid):
+    return asyncio.run(BrowserSession._enrich_profile(session, handle, uid))
+
+
+def test_enrich_swaps_the_numeric_id_and_returns_the_rich_record():
+    reply = json.dumps({"data": {"user": {"username": "nasa", "follower_count": 104409347}}})
+    session, sent = _stub_session(reply)
+    rich = _enrich(session, "nasa", "528817151")
+    assert rich["follower_count"] == 104409347
+    # The query is keyed by the id, so that is what must have been re-pointed.
+    assert sent["template"]["variables"]["id"] == "528817151"
+
+
+def test_enrich_rejects_a_record_for_a_different_handle():
+    # Never return another account's data under this handle.
+    reply = json.dumps({"data": {"user": {"username": "bbcstrictly", "follower_count": 1}}})
+    session, _ = _stub_session(reply)
+    assert _enrich(session, "bbc", "2244940797") is None
+
+
+def test_enrich_is_a_noop_without_a_captured_template():
+    session, _ = _stub_session("{}", seed=False)
+    assert _enrich(session, "nasa", "528817151") is None
+
+
+def test_enrich_is_a_noop_without_a_resolved_id():
+    session, _ = _stub_session("{}")
+    assert _enrich(session, "nasa", "") is None
+
+
+def test_enrich_returns_none_when_the_reply_carries_no_user():
+    session, _ = _stub_session(json.dumps({"data": {"viewer": {}}}))
+    assert _enrich(session, "nasa", "528817151") is None

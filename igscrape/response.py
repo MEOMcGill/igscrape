@@ -92,6 +92,10 @@ class InstagramResponseInterceptor:
         self.latest_request_form: dict | None = None
         self.latest_request_headers: dict | None = None
 
+        # Whether to collect the "Suggested for you" users — only the chaining
+        # endpoint wants them. Per-scrape, so flush() clears it.
+        self.collect_chaining_users: bool = False
+
         # Global dedup set so overlapping pages never double-count a post.
         self._seen_post_ids: set[str] = set()
 
@@ -116,6 +120,7 @@ class InstagramResponseInterceptor:
         # The streaming hook is per-scrape config; clear it so a reused session
         # never fires a previous task's callback on a later scrape.
         self.on_new_posts = None
+        self.collect_chaining_users = False
         # Templates are per-handle (target id is baked into the captured
         # variables), so drop them. Tokens are account/session-level — keep.
         self.templates = {}
@@ -235,6 +240,12 @@ class InstagramResponseInterceptor:
             label = "user_timeline"
         elif any(k in keys for k in SEARCH_DATA_KEYS):
             label = "search"
+        elif "user" in keys and variables.get("id"):
+            # The profile-info query (PolarisProfilePageContentQuery) — the only
+            # response carrying the rich user record (follower counts, bio,
+            # category). Keyed by the numeric user id, not the username, so it is
+            # re-targeted by swapping the id (see _enrich_profile).
+            label = "profile_info"
         else:
             return
 
@@ -309,6 +320,11 @@ class InstagramResponseInterceptor:
         elif "xdt_fbsearch__top_serp_graphql" in keys:
             self._parse_search(data["xdt_fbsearch__top_serp_graphql"] or {})
         elif "xdt_api__v1__discover__chaining" in keys:
+            # "Suggested for you" fires on any profile page load, and its users
+            # are not the handle being scraped — collecting them everywhere put
+            # dozens of unrelated thin records into every result's `users`.
+            if not self.collect_chaining_users:
+                return
             chaining = data["xdt_api__v1__discover__chaining"] or {}
             self.user_metadata_list += chaining.get("users") or []
         elif "user" in keys:
