@@ -247,6 +247,19 @@ class BrowserSession:
             except Exception as e:
                 logger.debug(f"Continue reauth candidate skipped: {e}")
 
+    def is_alive(self) -> bool:
+        """Whether the browser is still connected and the page still open.
+
+        Playwright raises the same error for a page, a context and a whole browser
+        that has gone away, so ask it rather than reading the message.
+        """
+        return (
+            self._browser is not None
+            and self._browser.is_connected()
+            and self.page is not None
+            and not self.page.is_closed()
+        )
+
     async def close(self):
         if self.response_interceptor:
             self.response_interceptor.stop_interception()
