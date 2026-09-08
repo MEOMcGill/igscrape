@@ -48,7 +48,7 @@ from .pagination import (
 from .parsers import get_post_timestamp, owner_ids, post_flattener
 from .response import InstagramResponseInterceptor, has_post_connection
 from .stop_conditions import StopState, assemble_default_stop_conditions
-from .utils import get_device_os
+from .utils import get_device_os, get_window_size
 
 BASE_URL = "https://www.instagram.com/"
 
@@ -168,6 +168,9 @@ class BrowserSession:
             proxy=proxy_settings,
             geoip=True if proxy_settings else False,
             os=get_device_os(),
+            # Headful only: the virtual display sizes itself, and an
+            # unconstrained window can open larger than the screen.
+            window=None if self.headless else get_window_size(),
             firefox_user_prefs={
                 "browser.aboutwelcome.enabled": False,
                 "browser.startup.firstrunSkipsHomepage": True,
