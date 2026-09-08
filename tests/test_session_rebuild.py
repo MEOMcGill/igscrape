@@ -52,11 +52,22 @@ class FakeAccount:
     username = "acct"
 
 
+class FakePool:
+    """Only what execute_task touches: it renews the account lease per task."""
+
+    def __init__(self):
+        self.renewals = 0
+
+    async def renew_lease(self, username):
+        self.renewals += 1
+
+
 def _worker(sessions):
     """A Worker whose _ensure_session hands out `sessions` in order."""
     worker = Worker.__new__(Worker)      # bypass __init__'s AccountsPool
     worker.id = "worker-0"
     worker.current_account = FakeAccount()
+    worker.pool = FakePool()
     worker.handles_scraped = 0
     worker.handles_per_rest = 100
     worker.session = None

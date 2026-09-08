@@ -210,6 +210,9 @@ class Worker:
             )
             await self.rotate_account()
 
+        # Renewing per task is what makes the claim expire only when we are gone.
+        await self.pool.renew_lease(self.current_account.username)
+
         max_retries = 3
         for attempt in range(max_retries):
             try:
