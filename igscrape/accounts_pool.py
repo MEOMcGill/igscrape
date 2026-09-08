@@ -10,6 +10,11 @@ from .exceptions import NoAccountError
 from .logger import logger
 from .utils import get_env_bool, parse_cookies, utc
 
+# How long an acquired account stays claimed without a renewal. A holder renews as
+# it works, so this only ever expires when the holder is gone -- a killed run then
+# stops stranding its account instead of blocking it until someone clears in_use.
+LEASE_MINUTES = 60
+
 
 class AccountsPool:
     _order_by: str = "scroll_count_overall_24h ASC"
@@ -203,7 +208,8 @@ class AccountsPool:
             qs = f"""
             UPDATE accounts SET
                 last_used = datetime({utc.ts()}, 'unixepoch'),
-                in_use = true
+                in_use = true,
+                locks = json_set(locks, '$.held_until', datetime('now', '+{LEASE_MINUTES} minutes'))
             WHERE username = ({subquery})
             RETURNING *
             """
@@ -214,6 +220,9 @@ class AccountsPool:
             UPDATE accounts SET
                 last_used = datetime({utc.ts()}, 'unixepoch'),
                 in_use = true,
+                locks = json_set(
+                    locks, '$.held_until', datetime('now', '+{LEASE_MINUTES} minutes')
+                ),
                 _tx = '{tx}'
             WHERE username = ({subquery})
             """
@@ -227,7 +236,20 @@ class AccountsPool:
         q = f"""
         SELECT username FROM accounts
         WHERE active = true
-          AND in_use = false
+          AND (
+                in_use = false
+                -- the holder stopped renewing, so it is gone
+                OR json_extract(locks, '$.held_until') < datetime('now')
+                -- claimed before leases existed: fall back to idle time, so a live
+                -- holder on older code is not taken out from under it
+                OR (
+                      json_extract(locks, '$.held_until') IS NULL
+                      AND (
+                            last_used IS NULL
+                            OR last_used < datetime('now', '-{LEASE_MINUTES} minutes')
+                      )
+                )
+          )
           AND (
                 locks IS NULL
                 OR json_extract(locks, '$.locked_until') IS NULL
@@ -288,8 +310,22 @@ class AccountsPool:
         qs = f"""
         UPDATE accounts SET
             in_use = false,
+            locks = json_remove(locks, '$.held_until'),
             last_used = datetime({utc.ts()}, 'unixepoch')
         WHERE {where}
+        """
+        await execute(self._db_file, qs)
+
+    async def renew_lease(self, username: str):
+        """Push this holder's claim out by another lease window.
+
+        Guarded on `in_use` so a holder that has already been reclaimed cannot
+        re-claim the account behind whoever took it.
+        """
+        qs = f"""
+        UPDATE accounts SET
+            locks = json_set(locks, '$.held_until', datetime('now', '+{LEASE_MINUTES} minutes'))
+        WHERE {self._id_cond(username)} AND in_use = true
         """
         await execute(self._db_file, qs)
 
