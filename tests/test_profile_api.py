@@ -69,9 +69,53 @@ def test_owner_falls_back_to_owner_id_when_user_is_null():
     assert _classify(owner) is None
 
 
-def test_owner_prefers_a_real_user_record_when_present():
-    node = {"node": {"user": {"username": "someone", "pk": "5", "is_private": False}}}
+def _foreign_user_node(username="someone", pk="5"):
+    """An edge authored by another account: a collab or a repost. Its `owner_id`
+    names that account too, so nothing on the node identifies this timeline."""
+    return {"node": {"pk": "9", "user": {"username": username, "pk": pk, "is_private": False},
+                     "owner_id": {"pk": pk, "id": pk}}}
+
+
+def test_owner_prefers_a_real_user_record_matching_the_handle():
+    node = {"node": {"user": {"username": "charest_isabelle", "pk": "5", "is_private": False}}}
     owner = BrowserSession._owner_from_payloads(_conn([node]), "charest_isabelle")
+    assert owner["username"] == "charest_isabelle"
+
+
+def test_owner_skips_a_foreign_authored_edge_and_keeps_looking():
+    # The handle's own post sits behind a collab/repost; resolving to the collab
+    # partner made _resolve_profile report the account as unavailable.
+    edges = [_foreign_user_node(), _null_user_node()]
+    owner = BrowserSession._owner_from_payloads(_conn(edges), "charest_isabelle")
+    assert owner["username"] == "charest_isabelle"
+    assert owner["pk"] == "2931777286"
+
+
+def test_owner_ignores_a_foreign_edges_owner_id():
+    # Falling through to this node's owner_id would file the timeline under the
+    # foreign author's numeric id.
+    owner = BrowserSession._owner_from_payloads(_conn([_foreign_user_node()]), "charest_isabelle")
+    assert owner is None
+
+
+def test_owner_matches_handle_case_insensitively():
+    node = {"node": {"user": {"username": "Charest_Isabelle", "pk": "5"}}}
+    owner = BrowserSession._owner_from_payloads(_conn([node]), "charest_isabelle")
+    assert owner["pk"] == "5"
+
+
+def test_owner_skips_foreign_author_nested_under_media():
+    edges = [{"node": {"media": {"user": {"username": "someone", "pk": "5"},
+                                 "owner_id": {"pk": "5", "id": "5"}}}},
+             _null_user_node()]
+    owner = BrowserSession._owner_from_payloads(_conn(edges), "charest_isabelle")
+    assert owner["username"] == "charest_isabelle"
+
+
+def test_owner_accepts_any_user_record_when_no_handle_is_given():
+    # Nothing to compare against, so the record stands as the only owner evidence.
+    node = {"node": {"user": {"username": "someone", "pk": "5"}}}
+    owner = BrowserSession._owner_from_payloads(_conn([node]))
     assert owner["username"] == "someone"
 
 
