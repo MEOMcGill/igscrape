@@ -7,6 +7,8 @@ Retry/rotate/crash behavior follows the result-code taxonomy
 import asyncio
 from collections.abc import Callable
 
+from playwright.async_api import Error as PWError
+
 from .account import Account
 from .accounts_pool import AccountsPool
 from .browser_session import BrowserSession
@@ -80,6 +82,9 @@ HANDLES_PER_REST = 100
 REST_SECONDS = 300
 # consume_post_scraper.py:42
 RETRY_MINUTES = 15
+# Closing a browser that has already gone away can hang, and the session is being
+# discarded either way.
+SESSION_CLOSE_SECONDS = 30
 
 
 class Worker:
@@ -180,7 +185,9 @@ class Worker:
     async def _close_session(self):
         if self.session is not None:
             try:
-                await self.session.close()
+                await asyncio.wait_for(
+                    self.session.close(), timeout=SESSION_CLOSE_SECONDS
+                )
             except Exception:
                 pass
             self.session = None
@@ -321,6 +328,17 @@ class Worker:
                     f"{self.current_account.username}: {e}"
                 )
                 await self.rotate_account()
+            except PWError as e:
+                # Playwright raises this for anything it can no longer reach. A session
+                # that has gone away is reused by every task still queued behind this
+                # one, so drop it and let the next attempt build a fresh browser.
+                if self.session is not None and self.session.is_alive():
+                    raise
+                logger.error(
+                    f"Worker {self.id}: browser session gone for {task.query}: {e} — "
+                    f"rebuilding, attempt {attempt + 1}/{max_retries}"
+                )
+                await self._close_session()
 
         raise RuntimeError(
             f"Worker {self.id}: failed to execute task after {max_retries} retries"
