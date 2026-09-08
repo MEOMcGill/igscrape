@@ -739,6 +739,12 @@ class BrowserSession:
                 node = edge.get("node") or {}
                 owner = node.get("user") or (node.get("media") or {}).get("user")
                 if owner:
+                    author = str(owner.get("username") or "")
+                    # A populated `user` is the post's author, which on a collab or a
+                    # repost is not this timeline's owner -- and the node's `owner_id`
+                    # names them too, so skip the node rather than resolve to them.
+                    if handle and author and author.lower() != handle.lower():
+                        continue
                     return owner
                 ids = owner_ids(node) or owner_ids(node.get("media") or {})
                 if ids:
