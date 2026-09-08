@@ -132,3 +132,36 @@ async def gather(coros):
     """Yield results from coroutines as they complete (unordered)."""
     for c in asyncio.as_completed(list(coros)):
         yield await c
+
+
+# Largest headful window we ask Camoufox for. Left to itself Camoufox takes the
+# window size from the generated fingerprint, which can be bigger than the
+# display — on a scaled desktop that leaves the login form off-screen.
+MAX_WINDOW_SIZE = (1100, 700)
+
+
+def get_window_size() -> tuple[int, int]:
+    """Headful browser window size in CSS pixels, shrunk to fit the display.
+
+    IGSCRAPE_WINDOW_SIZE=1280x720 overrides it, for hosts where the monitor
+    cannot be probed (e.g. a Windows box driven over SSH).
+    """
+    max_w, max_h = MAX_WINDOW_SIZE
+
+    override = os.getenv("IGSCRAPE_WINDOW_SIZE", "")
+    if override:
+        try:
+            w, h = (int(x) for x in override.lower().split("x", 1))
+            return w, h
+        except ValueError:
+            pass
+
+    try:
+        from screeninfo import get_monitors
+
+        monitor = max(get_monitors(), key=lambda m: m.width * m.height)
+    except Exception:
+        return max_w, max_h
+
+    # Room for the taskbar and window chrome.
+    return min(max_w, monitor.width - 80), min(max_h, monitor.height - 120)
