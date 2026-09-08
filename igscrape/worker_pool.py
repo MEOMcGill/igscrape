@@ -6,6 +6,7 @@ from .accounts_pool import AccountsPool
 from .exceptions import NoAccountError
 from .logger import logger
 from .models import Query
+from .utils import utc
 from .worker import HANDLES_PER_REST, Worker
 
 
@@ -31,6 +32,20 @@ class WorkerPool:
         self._shutdown = False
         self._init_lock = asyncio.Lock()
 
+    @staticmethod
+    def _unavailable(active: list) -> tuple[list[str], list[str]]:
+        """Active accounts this run cannot take, split by why: `in_use` (another
+        run holds it, or a killed run left the lock behind) and `rested` (an
+        unexpired `locked_until`). Mirrors the exclusions in get_available."""
+        now = utc.now()
+        held = sorted(a.username for a in active if a.in_use)
+        rested = sorted(
+            a.username
+            for a in active
+            if not a.in_use and (a.locks.get("locked_until") or now) > now
+        )
+        return held, rested
+
     async def initialize(self) -> int:
         if self._initialized:
             return len(self.workers)
@@ -39,11 +54,21 @@ class WorkerPool:
         if not active:
             raise NoAccountError("No active accounts in pool")
 
+        held, rested = self._unavailable(active)
+
         num = max(1, min(self.max_workers, len(active)))
         logger.info(
             f"WorkerPool initializing {num} workers "
-            f"(max={self.max_workers}, active={len(active)})"
+            f"(max={self.max_workers}, active={len(active)}, "
+            f"free={len(active) - len(held) - len(rested)}, "
+            f"in_use={len(held)}, rested={len(rested)})"
         )
+        if held:
+            logger.warning(
+                f"accounts already in_use at pool start: {', '.join(held)} — "
+                "a concurrent run may hold these; a lock left behind by a killed "
+                "run holds them until it is cleared"
+            )
 
         for i in range(num):
             try:
