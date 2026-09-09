@@ -7,13 +7,14 @@ responses instead of parsing HTML, and rotates through a pool of accounts so lon
 collection runs survive rate limits, challenges, and crashes.
 
 [![CI](https://github.com/MEOMcGill/igscrape/actions/workflows/ci.yml/badge.svg)](https://github.com/MEOMcGill/igscrape/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/License-PolyForm%20Noncommercial%201.0.0-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![Ruff](https://img.shields.io/badge/lint-ruff-261230.svg)](https://github.com/astral-sh/ruff)
 
-Built and maintained at the [Media Ecosystem Observatory](https://www.mediaecosystemobservatory.com/)
-for social-media research. Sibling project: [pytok](https://github.com/networkdynamics/pytok),
-the same approach for TikTok.
+Built and maintained at the [Media Ecosystem Observatory](https://mediatechdemocracy.com/en/meo/)
+for social-media research. Sibling projects: [fbscrape](https://github.com/MEOMcGill/fbscrape)
+for Facebook, [pytok](https://github.com/networkdynamics/pytok) for TikTok and
+[xscrape](https://github.com/MEOMcGill/xscrape) for X/Twitter.
 
 ## Why igscrape
 
