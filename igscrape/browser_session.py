@@ -56,6 +56,9 @@ BASE_URL = "https://www.instagram.com/"
 # replays so the session still produces human-like page activity.
 REPLAY_TIMEOUT_MS = 30000
 FINGERPRINT_EVERY = 50
+# The burst is cosmetic, so it is never allowed to outlive this budget: mouse.wheel
+# takes no timeout of its own and blocks forever on a wedged renderer.
+FINGERPRINT_BURST_TIMEOUT = 30.0
 
 # How many consecutive all-duplicate pages end a keyword search. The SERP tail is
 # sparse and bursty -- pages that add nothing are routinely followed by pages that
@@ -551,13 +554,28 @@ class BrowserSession:
 
     async def _fingerprint_scroll_burst(self, n_min: int = 2, n_max: int = 5):
         """A short burst of real scrolls to keep the session looking human
-        while the bulk of collection happens via direct replay."""
+        while the bulk of collection happens via direct replay.
+
+        Skipped rather than retried on failure, and bounded by
+        FINGERPRINT_BURST_TIMEOUT: losing the burst costs a little realism, while
+        waiting on it costs the whole collection.
+        """
         try:
-            for _ in range(random.randint(n_min, n_max)):
-                await self.page.mouse.wheel(0, random.randint(2000, 5000))
-                await asyncio.sleep(random.uniform(0.3, 1.0))
+            await asyncio.wait_for(
+                self._scroll_burst(n_min, n_max), timeout=FINGERPRINT_BURST_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"fingerprint scroll stalled past {FINGERPRINT_BURST_TIMEOUT:.0f}s; "
+                f"skipping the burst and continuing to replay"
+            )
         except Exception as e:
             logger.debug(f"fingerprint scroll failed: {e}")
+
+    async def _scroll_burst(self, n_min: int, n_max: int):
+        for _ in range(random.randint(n_min, n_max)):
+            await self.page.mouse.wheel(0, random.randint(2000, 5000))
+            await asyncio.sleep(random.uniform(0.3, 1.0))
 
     async def _send_replay(
         self, template: dict, body: str, headers: dict, timeout_ms: int = REPLAY_TIMEOUT_MS
