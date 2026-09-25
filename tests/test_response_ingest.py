@@ -238,3 +238,63 @@ def test_flush_clears_the_chaining_opt_in():
     interceptor.collect_chaining_users = True
     interceptor.flush()
     assert interceptor.collect_chaining_users is False
+
+
+def _home_feed(pk):
+    return {
+        "xdt_api__v1__feed__timeline__connection": {
+            "edges": [{"node": {"__typename": "XDTMediaDict", "pk": pk, "taken_at": 1}}]
+        }
+    }
+
+
+def _serp(pk):
+    return {
+        "xdt_fbsearch__top_serp_graphql": {
+            "edges": [
+                {
+                    "node": {
+                        "__typename": "XDTTopSerpMediaGridUnit",
+                        "items": [{"pk": pk, "taken_at": 1}],
+                    }
+                }
+            ]
+        }
+    }
+
+
+def test_search_ignores_the_home_feed_that_loads_under_the_serp():
+    interceptor = InstagramResponseInterceptor()
+    interceptor.flush("Search")
+    new = interceptor.ingest_payloads([_home_feed("home"), _serp("hit")])
+    assert [p["pk"] for p in new] == ["hit"]
+
+
+def test_user_timeline_ignores_home_feed_and_serp_posts():
+    interceptor = InstagramResponseInterceptor()
+    interceptor.flush("UserTimeline")
+    profile = _feed_data([{"node": {"__typename": "XDTMediaDict", "pk": "own", "taken_at": 1}}])
+    new = interceptor.ingest_payloads([_home_feed("home"), _serp("hit"), profile])
+    assert [p["pk"] for p in new] == ["own"]
+
+
+def test_post_by_shortcode_ignores_feed_posts():
+    interceptor = InstagramResponseInterceptor()
+    interceptor.flush("PostByShortcode")
+    shortcode = {"xdt_api__v1__media__shortcode__web_info": {"items": [{"pk": "p"}]}}
+    new = interceptor.ingest_payloads([_home_feed("home"), shortcode])
+    assert [p["pk"] for p in new] == ["p"]
+
+
+def test_endpoint_scoping_leaves_users_alone():
+    interceptor = InstagramResponseInterceptor()
+    interceptor.flush("UserProfile")
+    interceptor.ingest_payloads([{"user": {"username": "x"}}])
+    assert interceptor.user_metadata_list == [{"username": "x"}]
+
+
+def test_flush_resets_the_endpoint():
+    interceptor = InstagramResponseInterceptor()
+    interceptor.flush("Search")
+    interceptor.flush()
+    assert [p["pk"] for p in interceptor.ingest_payloads([_home_feed("home")])] == ["home"]

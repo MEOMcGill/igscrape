@@ -1032,7 +1032,7 @@ class BrowserSession:
           - on_new_posts: a sync or async callback of your own.
         """
         self.endpoint = "UserTimeline"
-        self.response_interceptor.flush()
+        self.response_interceptor.flush(self.endpoint)
         effective_cb = self._build_stream_hook(
             on_new_posts, download_videos, video_dir, jsonl_path
         )
@@ -1123,7 +1123,7 @@ class BrowserSession:
         so it falls back to a single navigation, which is the only thing that
         will ever produce a record for those handles."""
         self.endpoint = "UserProfile"
-        self.response_interceptor.flush()
+        self.response_interceptor.flush(self.endpoint)
         start_time = datetime.now(timezone.utc)
         query = Query(endpoint="UserProfile", query={"handle": handle}, params={})
 
@@ -1155,7 +1155,7 @@ class BrowserSession:
     async def post_by_shortcode(self, shortcode: str) -> ScrapingResult:
         """Navigate to /p/<shortcode>/ and capture the shortcode XHR."""
         self.endpoint = "PostByShortcode"
-        self.response_interceptor.flush()
+        self.response_interceptor.flush(self.endpoint)
         start_time = datetime.now(timezone.utc)
         query = Query(
             endpoint="PostByShortcode", query={"shortcode": shortcode}, params={}
@@ -1203,7 +1203,7 @@ class BrowserSession:
         fall back to clicking anything labelled 'See all' / 'Suggested'.
         """
         self.endpoint = "Chaining"
-        self.response_interceptor.flush()
+        self.response_interceptor.flush(self.endpoint)
         self.response_interceptor.collect_chaining_users = True
         start_time = datetime.now(timezone.utc)
         query = Query(endpoint="Chaining", query={"handle": handle}, params={})
@@ -1293,7 +1293,7 @@ class BrowserSession:
         video_dir) behave exactly as in user_timeline.
         """
         self.endpoint = "Search"
-        self.response_interceptor.flush()
+        self.response_interceptor.flush(self.endpoint)
         effective_cb = self._build_stream_hook(
             on_new_posts, download_videos, video_dir, jsonl_path
         )
