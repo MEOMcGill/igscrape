@@ -520,10 +520,10 @@ def login(ctx, username, mode, headless, timeout, log_level, force):
 
     \b
     --mode manual: opens instagram.com and waits (see --timeout) while you log
-        in by hand, then saves whatever session you ended up with. Use this
-        when the account needs email/SMS verification, or has no stored
-        password. Progress is polled, not prompted, so it works when driven
-        over SSH.
+        in by hand, including any email/SMS verification, until the session
+        cookies are set and the home feed shows. Use this when the account
+        needs verification, or has no stored password. Progress is polled,
+        not prompted, so it works when driven over SSH.
 
     Accounts are processed one browser at a time. A failure on one does not
     abort the rest; the command exits non-zero if any failed.

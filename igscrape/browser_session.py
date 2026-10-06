@@ -62,6 +62,16 @@ FINGERPRINT_EVERY = 50
 _POST_HREF_RE = re.compile(r"^/[A-Za-z0-9_.-]+/(?:p|reel)/[A-Za-z0-9_.-]+/?$")
 
 
+SESSION_COOKIES = ("sessionid", "ds_user_id")
+
+
+def has_session_cookies(cookies: list[dict]) -> bool:
+    """True if a storage_state cookie list holds an authenticated session.
+    Pre-auth jars (e.g. mid-verification) carry csrftoken/mid/ig_did only."""
+    present = {c["name"] for c in cookies if c.get("value")}
+    return all(name in present for name in SESSION_COOKIES)
+
+
 def _is_post_href(href: str | None) -> bool:
     if not href:
         return False
@@ -208,11 +218,7 @@ class BrowserSession:
             return
 
         await self._handle_continue_reauth()
-
-        if await self._need_to_log_in():
-            ok = await self.login()
-            if not ok:
-                raise FailedLoginError(f"Login failed for {self.account.username}")
+        await self._ensure_logged_in()
 
         logger.info(f"Browser session ready for {self.account.username}")
 
@@ -238,7 +244,8 @@ class BrowserSession:
                     logger.info("'Continue' reauth screen detected — clicking")
                     await continue_button.first.click()
                     await asyncio.sleep(10)
-                    await self._save_cookies()
+                    if await self._is_logged_in():
+                        await self.save_cookies()
                     return
             except Exception as e:
                 logger.debug(f"Continue reauth candidate skipped: {e}")
@@ -321,6 +328,48 @@ class BrowserSession:
                 pass
         return False
 
+    def _home_control(self) -> Locator:
+        # exact=True so post images whose alt text merely contains "home"
+        # (e.g. "#coffeeathome") don't match — otherwise a login that redirects
+        # to a content page rather than the feed (e.g. reauth from a gated
+        # ?next=... URL) makes this locator resolve to many elements.
+        return self.page.get_by_label("Home", exact=True).or_(
+            self.page.get_by_role("img", name="Home", exact=True)
+        )
+
+    async def _is_logged_in(self, timeout: float = 0.0) -> bool:
+        """Positive login check: the session cookies are set and the Home
+        control is visible (waiting up to `timeout` seconds for it).
+
+        Verification and challenge screens have neither, so unlike
+        `not _need_to_log_in()` they don't read as logged in."""
+        storage = await self._context.storage_state()
+        if not has_session_cookies(storage["cookies"]):
+            return False
+        home = self._home_control().first
+        if not timeout:
+            return await home.is_visible()
+        try:
+            await home.wait_for(state="visible", timeout=timeout * 1000)
+            return True
+        except PWTimeoutError:
+            return False
+
+    async def _ensure_logged_in(self):
+        """Log in if a login form is showing; raise FailedLoginError if the
+        session ends up anywhere other than logged in (e.g. stuck on an
+        email/SMS verification or challenge screen)."""
+        if await self._is_logged_in(timeout=5):
+            return
+        if await self._need_to_log_in():
+            if not await self.login():
+                raise FailedLoginError(f"Login failed for {self.account.username}")
+            return
+        raise FailedLoginError(
+            f"{self.account.username} is not logged in and no login form is "
+            f"showing (verification or challenge screen?) at {self.page.url}"
+        )
+
     async def login(self) -> bool:
         """Replicates InstagramSession.log_in_to_instagram + the post-login
         popup/Home handling (post_scraper.py:264-328, 999-1021), with the
@@ -355,7 +404,7 @@ class BrowserSession:
             await self._dismiss_popups_and_wait_for_home()
 
             # Persist cookies and mark account active
-            await self._save_cookies()
+            await self.save_cookies()
             await self.pool.set_active(self.account.username, True, None)
             await self.pool.update_last_used(self.account.username)
             return True
@@ -371,13 +420,7 @@ class BrowserSession:
         may appear sequentially, then wait for the Home control. The 120s
         timeout leaves room for manual 2FA / challenge screens
         (post_scraper.py:307-327)."""
-        # exact=True so post images whose alt text merely contains "home"
-        # (e.g. "#coffeeathome") don't match — otherwise a login that redirects
-        # to a content page rather than the feed (e.g. reauth from a gated
-        # ?next=... URL) makes this locator resolve to many elements.
-        home = self.page.get_by_label("Home", exact=True).or_(
-            self.page.get_by_role("img", name="Home", exact=True)
-        )
+        home = self._home_control()
         for _ in range(6):
             try:
                 if await home.count() > 0 and await home.first.is_visible():
@@ -398,18 +441,16 @@ class BrowserSession:
         await expect(home.first).to_be_visible(timeout=120000)
         logger.info("home page detected")
 
-    async def _save_cookies(self):
-        storage = await self._context.storage_state()
-        await self.pool.update_cookies(self.account.username, storage["cookies"])
-
     async def save_cookies(self) -> int:
         """Persist the context's cookies to the pool and return how many were
-        written. Public counterpart to `_save_cookies`, for callers that drive
-        login themselves (`igscrape login --mode manual`) and so never go
-        through `login()`'s own save. Mirrors fbscrape's
-        `BrowserSession.save_cookies`."""
+        written. Raises FailedLoginError, saving nothing, if the jar has no
+        session cookies, so a pre-auth jar never overwrites a good one."""
         storage = await self._context.storage_state()
         cookies = storage["cookies"]
+        if not has_session_cookies(cookies):
+            raise FailedLoginError(
+                f"no session cookies for {self.account.username}; not saving"
+            )
         await self.pool.update_cookies(self.account.username, cookies)
         return len(cookies)
 
@@ -425,7 +466,7 @@ class BrowserSession:
         waited = 0.0
         while waited < timeout:
             try:
-                if not await self._need_to_log_in():
+                if await self._is_logged_in():
                     return True
             except Exception as e:
                 logger.debug(f"login check failed, retrying: {e}")
@@ -1265,10 +1306,7 @@ class BrowserSession:
         logger.info(f"bounced to login wall ({self.page.url}); reauthenticating")
         await self._handle_continue_reauth()
         await asyncio.sleep(5)
-        if await self._need_to_log_in():
-            ok = await self.login()
-            if not ok:
-                raise FailedLoginError(f"reauth failed for {self.account.username}")
+        await self._ensure_logged_in()
         await self._goto(target_url)
         await asyncio.sleep(5)
         return self.page.url == target_url
