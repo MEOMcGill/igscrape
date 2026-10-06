@@ -40,6 +40,19 @@ FEED_DATA_KEYS = (
     "xdt_api__v1__feed__user_timeline_graphql_connection",
 )
 SEARCH_DATA_KEYS = ("xdt_fbsearch__top_serp_graphql",)
+SHORTCODE_DATA_KEY = "xdt_api__v1__media__shortcode__web_info"
+
+# The post connections each endpoint collects. A page load also fires queries for
+# neighbouring surfaces (the logged-in home feed loads under the search page), and
+# their posts would otherwise land in the result looking like genuine hits.
+ENDPOINT_POST_KEYS = {
+    "UserTimeline": ("xdt_api__v1__feed__user_timeline_graphql_connection",),
+    "UserProfile": ("xdt_api__v1__feed__user_timeline_graphql_connection",),
+    "PostByShortcode": (SHORTCODE_DATA_KEY,),
+    "Search": SEARCH_DATA_KEYS,
+    "Chaining": (),
+}
+POST_DATA_KEYS = FEED_DATA_KEYS + SEARCH_DATA_KEYS + (SHORTCODE_DATA_KEY,)
 
 
 def has_post_connection(payloads: list[dict]) -> bool:
@@ -96,6 +109,10 @@ class InstagramResponseInterceptor:
         # endpoint wants them. Per-scrape, so flush() clears it.
         self.collect_chaining_users: bool = False
 
+        # The scrape in progress (a key of ENDPOINT_POST_KEYS). Empty accepts
+        # every post connection.
+        self.endpoint: str = ""
+
         # Global dedup set so overlapping pages never double-count a post.
         self._seen_post_ids: set[str] = set()
 
@@ -112,7 +129,8 @@ class InstagramResponseInterceptor:
                 pass
             self.page = None
 
-    def flush(self):
+    def flush(self, endpoint: str = ""):
+        self.endpoint = endpoint
         self.post_metadata_list = []
         self.user_metadata_list = []
         self.graphql_request_count = 0
@@ -309,12 +327,18 @@ class InstagramResponseInterceptor:
         if "xdt_notification_badge" in keys or "lightspeed_web_request_for_igd" in keys:
             return
 
+        if self.endpoint:
+            accepted = ENDPOINT_POST_KEYS.get(self.endpoint, POST_DATA_KEYS)
+            if any(k in keys for k in POST_DATA_KEYS if k not in accepted):
+                logger.debug(f"{self.endpoint}: ignoring posts from {list(keys)}")
+                return
+
         if "xdt_api__v1__feed__timeline__connection" in keys:
             self._parse_feed(data["xdt_api__v1__feed__timeline__connection"])
         elif "xdt_api__v1__feed__user_timeline_graphql_connection" in keys:
             self._parse_feed(data["xdt_api__v1__feed__user_timeline_graphql_connection"])
-        elif "xdt_api__v1__media__shortcode__web_info" in keys:
-            shortcode_data = data["xdt_api__v1__media__shortcode__web_info"]
+        elif SHORTCODE_DATA_KEY in keys:
+            shortcode_data = data[SHORTCODE_DATA_KEY]
             for item in shortcode_data.get("items") or []:
                 self._add_post(item)
         elif "xdt_fbsearch__top_serp_graphql" in keys:
