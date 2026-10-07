@@ -169,7 +169,8 @@ class AccountsPool:
     async def lock_until(self, username: str | list[str] | None, until: str):
         """Lock account(s) until a given SQLite datetime expression.
 
-        e.g. until="datetime('now', '+15 minutes')"
+        e.g. until="datetime('now', '+15 minutes')". Only ever extends a lock: an
+        account already locked for longer keeps its later expiry.
         """
         usernames = username if isinstance(username, list) else [username] if username else []
         if not usernames:
@@ -178,7 +179,11 @@ class AccountsPool:
             where = self._ids_cond(list(set(usernames)))
         qs = f"""
         UPDATE accounts SET
-            locks = json_set(locks, '$.locked_until', {until}),
+            locks = json_set(
+                locks,
+                '$.locked_until',
+                max(coalesce(json_extract(locks, '$.locked_until'), ''), {until})
+            ),
             last_used = datetime({utc.ts()}, 'unixepoch')
         WHERE {where}
         """
