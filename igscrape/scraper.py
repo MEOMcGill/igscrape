@@ -128,7 +128,16 @@ class InstagramScraper:
         chronological, so there is no date cutoff. Streaming options (jsonl_path
         / on_new_posts / download_videos + video_dir) behave exactly as in
         user_timeline.
+
+        Raises ValueError for a keyword starting with "@": keyword search does not
+        match account handles and returns nothing for them. Strip the "@" to search
+        the name as text, or use user_timeline for the account's own posts.
         """
+        if keyword.lstrip().startswith("@"):
+            raise ValueError(
+                f"search keyword {keyword!r} starts with '@'; keyword search returns no "
+                "results for handles -- strip the '@', or use user_timeline for the account"
+            )
         return await self._submit(
             Query(
                 endpoint="Search",

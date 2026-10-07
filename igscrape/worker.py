@@ -323,24 +323,25 @@ class Worker:
         )
 
     async def rotate_account(self):
-        """Release current account with a 5-minute cooldown, then acquire the
-        next available one.
+        """Release current account with a REST_SECONDS cooldown, then acquire the
+        next available one. A longer lock already on the account (e.g. a
+        rate-limit lockout) is kept.
 
         With a single-account pool there is nothing else to switch to, so we
         wait for the cooldown to expire and re-acquire the same account — this
         gives the periodic-rest behavior the production scraper relied on
-        (rest 5 min every HANDLES_PER_REST handles) instead of crashing.
+        (rest every HANDLES_PER_REST handles) instead of crashing.
         """
         await self._close_session()
         if self.current_account:
             await self.pool.lock_until(
                 self.current_account.username,
-                "datetime('now', '+5 minutes')",
+                f"datetime('now', '+{REST_SECONDS} seconds')",
             )
             await self.pool.release_account(self.current_account.username)
             logger.info(
                 f"Worker {self.id} released {self.current_account.username} "
-                f"(5-minute cooldown)"
+                f"(cooldown {REST_SECONDS // 60} min, or longer if already locked)"
             )
             self.current_account = None
 
