@@ -56,6 +56,16 @@ BASE_URL = "https://www.instagram.com/"
 # replays so the session still produces human-like page activity.
 REPLAY_TIMEOUT_MS = 30000
 FINGERPRINT_EVERY = 50
+# The burst is cosmetic, so it is never allowed to outlive this budget: mouse.wheel
+# takes no timeout of its own and blocks forever on a wedged renderer.
+FINGERPRINT_BURST_TIMEOUT = 30.0
+
+# How many consecutive all-duplicate pages end a keyword search. The SERP tail is
+# sparse and bursty -- pages that add nothing are routinely followed by pages that
+# do -- so this is a guess at where "sparse" becomes "over", not a signal from
+# Instagram. Raise it to collect deeper at the cost of more replays per keyword;
+# EndOfFeed still stops a search that genuinely runs out.
+SEARCH_NO_PROGRESS_STREAK = 5
 
 # Post/reel anchor detection for the grid-render poll (_wait_for_first_post).
 # Matches /<user>/p/<code>/ and /<user>/reel/<code>/ (main's f9b8f5b).
@@ -249,6 +259,19 @@ class BrowserSession:
                     return
             except Exception as e:
                 logger.debug(f"Continue reauth candidate skipped: {e}")
+
+    def is_alive(self) -> bool:
+        """Whether the browser is still connected and the page still open.
+
+        Playwright raises the same error for a page, a context and a whole browser
+        that has gone away, so ask it rather than reading the message.
+        """
+        return (
+            self._browser is not None
+            and self._browser.is_connected()
+            and self.page is not None
+            and not self.page.is_closed()
+        )
 
     async def close(self):
         if self.response_interceptor:
@@ -572,13 +595,28 @@ class BrowserSession:
 
     async def _fingerprint_scroll_burst(self, n_min: int = 2, n_max: int = 5):
         """A short burst of real scrolls to keep the session looking human
-        while the bulk of collection happens via direct replay."""
+        while the bulk of collection happens via direct replay.
+
+        Skipped rather than retried on failure, and bounded by
+        FINGERPRINT_BURST_TIMEOUT: losing the burst costs a little realism, while
+        waiting on it costs the whole collection.
+        """
         try:
-            for _ in range(random.randint(n_min, n_max)):
-                await self.page.mouse.wheel(0, random.randint(2000, 5000))
-                await asyncio.sleep(random.uniform(0.3, 1.0))
+            await asyncio.wait_for(
+                self._scroll_burst(n_min, n_max), timeout=FINGERPRINT_BURST_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"fingerprint scroll stalled past {FINGERPRINT_BURST_TIMEOUT:.0f}s; "
+                f"skipping the burst and continuing to replay"
+            )
         except Exception as e:
             logger.debug(f"fingerprint scroll failed: {e}")
+
+    async def _scroll_burst(self, n_min: int, n_max: int):
+        for _ in range(random.randint(n_min, n_max)):
+            await self.page.mouse.wheel(0, random.randint(2000, 5000))
+            await asyncio.sleep(random.uniform(0.3, 1.0))
 
     async def _send_replay(
         self, template: dict, body: str, headers: dict, timeout_ms: int = REPLAY_TIMEOUT_MS
@@ -1315,6 +1353,8 @@ class BrowserSession:
         self,
         keyword: str,
         max_posts: int = -1,
+        max_no_progress_streak: int = SEARCH_NO_PROGRESS_STREAK,
+        page_count: int = DEFAULT_PAGE_COUNT,
         on_new_posts: Callable[[list[dict]], None | Awaitable[None]] | None = None,
         download_videos: bool = False,
         video_dir: str | Path | None = None,
@@ -1326,6 +1366,11 @@ class BrowserSession:
         advancing cursor. Search results aren't reliably chronological, so there
         is no date cutoff — collection stops on `max_posts`, end-of-feed, or a
         no-progress streak (see stop_conditions).
+
+        `max_no_progress_streak` is how deep to keep going through all-duplicate
+        pages, and is usually what ends a broad keyword: the SERP keeps offering
+        `has_next_page` long after it has stopped yielding much. `page_count` is
+        how many results each replay asks for.
 
         Streaming options (jsonl_path / on_new_posts / download_videos +
         video_dir) behave exactly as in user_timeline.
@@ -1371,7 +1416,8 @@ class BrowserSession:
         params = {
             "max_posts": max_posts,
             "max_paginations": 2000,
-            "max_no_progress_streak": 5,
+            "max_no_progress_streak": max_no_progress_streak,
+            "page_count": page_count,
         }
         strategy = select_cursor_strategy(template)
         conditions = assemble_default_stop_conditions("Search", params)

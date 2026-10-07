@@ -9,7 +9,7 @@ later handle is resolved by replaying that template with the username swapped â€
 no page load. If the later handles come back "success" (not a RateLimitError),
 the hypothesis holds.
 
-    python examples/test_profile_graphql_replay.py natgeo nasa bbc
+    python examples/profile_graphql_replay.py natgeo nasa bbc
 
 Needs a populated accounts DB, same as the other examples. Run headful the first
 time to watch the single seed navigation.

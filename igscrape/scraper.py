@@ -16,8 +16,10 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from .accounts_pool import AccountsPool
+from .browser_session import SEARCH_NO_PROGRESS_STREAK
 from .logger import logger
 from .models import Query, ScrapingResult
+from .pagination import DEFAULT_PAGE_COUNT
 from .worker_pool import WorkerPool
 
 
@@ -115,6 +117,8 @@ class InstagramScraper:
         self,
         keyword: str,
         max_posts: int = -1,
+        max_no_progress_streak: int = SEARCH_NO_PROGRESS_STREAK,
+        page_count: int = DEFAULT_PAGE_COUNT,
         on_new_posts: Callable[[list[dict]], None | Awaitable[None]] | None = None,
         download_videos: bool = False,
         video_dir: str | Path | None = None,
@@ -129,6 +133,12 @@ class InstagramScraper:
         / on_new_posts / download_videos + video_dir) behave exactly as in
         user_timeline.
 
+        How far a broad keyword gets is set by `max_no_progress_streak` (how many
+        consecutive all-duplicate pages to tolerate before giving up) far more
+        than by `max_posts`: the SERP keeps advertising a next page long after it
+        has thinned out, so this is normally what ends the search. `page_count`
+        sets how many results each replay asks for.
+
         Raises ValueError for a keyword starting with "@": keyword search does not
         match account handles and returns nothing for them. Strip the "@" to search
         the name as text, or use user_timeline for the account's own posts.
@@ -141,7 +151,12 @@ class InstagramScraper:
         return await self._submit(
             Query(
                 endpoint="Search",
-                query={"keyword": keyword, "max_posts": max_posts},
+                query={
+                    "keyword": keyword,
+                    "max_posts": max_posts,
+                    "max_no_progress_streak": max_no_progress_streak,
+                    "page_count": page_count,
+                },
                 params={},
                 runtime_options={
                     "on_new_posts": on_new_posts,

@@ -7,6 +7,8 @@ Retry/rotate/crash behavior follows the result-code taxonomy
 import asyncio
 from collections.abc import Callable
 
+from playwright.async_api import Error as PWError
+
 from .account import Account
 from .accounts_pool import AccountsPool
 from .browser_session import BrowserSession
@@ -53,15 +55,17 @@ PARTIAL_CASES = {
 }
 
 
-def _handle_user_ids(handle: str, users: list[dict] | None) -> set[str]:
-    """Numeric ids belonging to `handle`, taken from the profile records captured
-    during the scrape.
+def _handle_user_records(handle: str, users: list[dict] | None) -> dict[str, dict]:
+    """Full profile records belonging to `handle`, keyed by numeric id, taken
+    from the profile records captured during the scrape.
 
     Needed because the profile-posts connection nulls each node's `user` and
-    identifies the author only by `owner_id`, so the authorship filter has to
-    match on id (see parsers.keep_record).
+    identifies the author only by `owner_id`. The id lets the authorship
+    filter match a node to `handle` (see parsers.keep_record); the full
+    record is what lets parsers.enrich_owner restore real user metadata on
+    that node instead of just proving an id.
     """
-    ids: set[str] = set()
+    by_id: dict[str, dict] = {}
     for user in users or []:
         if not isinstance(user, dict):
             continue
@@ -69,8 +73,8 @@ def _handle_user_ids(handle: str, users: list[dict] | None) -> set[str]:
             continue
         for key in ("id", "pk"):
             if user.get(key) is not None:
-                ids.add(str(user[key]))
-    return ids
+                by_id[str(user[key])] = user
+    return by_id
 
 
 # Rotation policy: rest after 100 handles
@@ -78,6 +82,9 @@ HANDLES_PER_REST = 100
 REST_SECONDS = 300
 # consume_post_scraper.py:42
 RETRY_MINUTES = 15
+# Closing a browser that has already gone away can hang, and the session is being
+# discarded either way.
+SESSION_CLOSE_SECONDS = 30
 
 
 class Worker:
@@ -178,7 +185,9 @@ class Worker:
     async def _close_session(self):
         if self.session is not None:
             try:
-                await self.session.close()
+                await asyncio.wait_for(
+                    self.session.close(), timeout=SESSION_CLOSE_SECONDS
+                )
             except Exception:
                 pass
             self.session = None
@@ -201,6 +210,9 @@ class Worker:
             )
             await self.rotate_account()
 
+        # Renewing per task is what makes the claim expire only when we are gone.
+        await self.pool.renew_lease(self.current_account.username)
+
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -221,12 +233,14 @@ class Worker:
                         handle = task.query["handle"]
                         start = task.query["start_date"]
                         end = task.query["end_date"]
+                        user_records = _handle_user_records(handle, result.users)
                         result.posts = post_authorship_filterer(
                             handle,
                             post_date_filterer(
                                 post_flattener(result.posts), start, end
                             ),
-                            user_ids=_handle_user_ids(handle, result.users),
+                            user_ids=set(user_records),
+                            user_records=user_records,
                         )
                     # Search results aren't from one author, so only flatten —
                     # no authorship filter. Posts are already XDTMediaDict, so
@@ -317,6 +331,17 @@ class Worker:
                     f"{self.current_account.username}: {e}"
                 )
                 await self.rotate_account()
+            except PWError as e:
+                # Playwright raises this for anything it can no longer reach. A session
+                # that has gone away is reused by every task still queued behind this
+                # one, so drop it and let the next attempt build a fresh browser.
+                if self.session is not None and self.session.is_alive():
+                    raise
+                logger.error(
+                    f"Worker {self.id}: browser session gone for {task.query}: {e} — "
+                    f"rebuilding, attempt {attempt + 1}/{max_retries}"
+                )
+                await self._close_session()
 
         raise RuntimeError(
             f"Worker {self.id}: failed to execute task after {max_retries} retries"

@@ -1,11 +1,13 @@
 """Pool of Workers consuming tasks from a shared asyncio.Queue."""
 
 import asyncio
+from datetime import timedelta
 
-from .accounts_pool import AccountsPool
+from .accounts_pool import LEASE_MINUTES, AccountsPool
 from .exceptions import NoAccountError
 from .logger import logger
 from .models import Query
+from .utils import utc
 from .worker import HANDLES_PER_REST, Worker
 
 
@@ -31,6 +33,33 @@ class WorkerPool:
         self._shutdown = False
         self._init_lock = asyncio.Lock()
 
+    @staticmethod
+    def _claimed(account, now) -> bool:
+        """Whether someone still holds this account, by the same rule
+        get_available reclaims one: a live lease, or -- for a claim made before
+        leases existed -- recent activity."""
+        held_until = account.locks.get("held_until")
+        if held_until is not None:
+            return held_until > now
+        cutoff = now - timedelta(minutes=LEASE_MINUTES)
+        return account.last_used is not None and account.last_used > cutoff
+
+    @staticmethod
+    def _unavailable(active: list) -> tuple[list[str], list[str]]:
+        """Active accounts this run cannot take, split by why: claimed by another
+        run, or `rested` on an unexpired `locked_until`. Mirrors the exclusions in
+        get_available, so an `in_use` account whose holder is gone counts as free."""
+        now = utc.now()
+        held = sorted(
+            a.username for a in active if a.in_use and WorkerPool._claimed(a, now)
+        )
+        rested = sorted(
+            a.username
+            for a in active
+            if a.username not in held and (a.locks.get("locked_until") or now) > now
+        )
+        return held, rested
+
     async def initialize(self) -> int:
         if self._initialized:
             return len(self.workers)
@@ -39,11 +68,21 @@ class WorkerPool:
         if not active:
             raise NoAccountError("No active accounts in pool")
 
+        held, rested = self._unavailable(active)
+
         num = max(1, min(self.max_workers, len(active)))
         logger.info(
             f"WorkerPool initializing {num} workers "
-            f"(max={self.max_workers}, active={len(active)})"
+            f"(max={self.max_workers}, active={len(active)}, "
+            f"free={len(active) - len(held) - len(rested)}, "
+            f"in_use={len(held)}, rested={len(rested)})"
         )
+        if held:
+            logger.warning(
+                f"accounts already in_use at pool start: {', '.join(held)} — "
+                "a concurrent run may hold these; a lock left behind by a killed "
+                "run holds them until it is cleared"
+            )
 
         for i in range(num):
             try:
