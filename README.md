@@ -56,6 +56,9 @@ playwright install firefox
 Optional: `ffmpeg` on `PATH` for merged video downloads, `polars` for Parquet
 export (already a dependency).
 
+Or run it in Docker, with the browser on a virtual display you can watch over
+noVNC: see [DOCKER.md](DOCKER.md).
+
 ## Quick start (Python)
 
 ```python
