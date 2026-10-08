@@ -1,0 +1,39 @@
+# igscrape in a container. See DOCKER.md.
+#
+#   docker compose run --rm scraper igscrape scrape user-timeline natgeo --start-date 2026-01-01
+#   docker compose run --rm --service-ports login igscrape login me --mode manual
+
+x-igscrape: &igscrape
+  image: igscrape:latest
+  build:
+    context: .
+    args:
+      UID: ${UID:-1000}
+      GID: ${GID:-1000}
+  # Firefox content processes share memory through /dev/shm; Docker's 64MB
+  # default crashes tabs under a real page load.
+  shm_size: 2gb
+  volumes:
+    # The account pool (credentials + cookies) and scrape output. Not baked into
+    # the image (.dockerignore), so they survive rebuilds.
+    - ./db:/app/db
+    - ./data:/app/data
+  stdin_open: true
+  tty: true
+
+services:
+  scraper:
+    <<: *igscrape
+
+  # A browser you can see: logging an account in by hand, or solving a checkpoint.
+  # noVNC on 6080, bound to localhost; on a server, reach it with `ssh -L 6080:localhost:6080`.
+  login:
+    <<: *igscrape
+    profiles: ["login"]
+    environment:
+      VNC: "1"
+      # Larger than any window camoufox sizes itself, which otherwise can overhang
+      # an 800px-tall screen and push the page's top off it.
+      SCREEN_RES: 1920x1200x24
+    ports:
+      - "127.0.0.1:6080:6080"
