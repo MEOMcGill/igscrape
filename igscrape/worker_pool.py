@@ -29,6 +29,8 @@ class WorkerPool:
         self.workers: list[Worker] = []
         self.worker_tasks: list[asyncio.Task] = []
         self.task_queue: asyncio.Queue = asyncio.Queue()
+        # Workers whose account was lost with nothing to rotate onto.
+        self._retired: set[str] = set()
         self._initialized = False
         self._shutdown = False
         self._init_lock = asyncio.Lock()
@@ -109,6 +111,33 @@ class WorkerPool:
         self._initialized = True
         return len(self.workers)
 
+    def _live_workers(self) -> int:
+        return len(self.workers) - len(self._retired)
+
+    def _fail_queued(self, exc: Exception):
+        """Fail every task still queued, so callers stop waiting on a pool with
+        no worker left to run them."""
+        while not self.task_queue.empty():
+            _, future = self.task_queue.get_nowait()
+            if not future.done():
+                future.set_exception(exc)
+            self.task_queue.task_done()
+
+    def _retire(self, worker: Worker, query: Query, future: asyncio.Future, exc: Exception):
+        """Take a worker that has no account out of the loop. Its task goes back on
+        the queue for the workers still running; once none are, every waiting
+        caller gets the NoAccountError instead of a worker with no account."""
+        self._retired.add(worker.id)
+        live = self._live_workers()
+        logger.warning(f"{worker.id} retiring, no account left ({live} worker(s) still running)")
+        if live and not future.done():
+            self.task_queue.put_nowait((query, future))
+            return
+        if not future.done():
+            future.set_exception(exc)
+        if not live:
+            self._fail_queued(exc)
+
     async def _worker_loop(self, worker: Worker):
         logger.info(f"{worker.id} loop started")
         while not self._shutdown:
@@ -140,6 +169,7 @@ class WorkerPool:
                     t.cancel()
 
             future.add_done_callback(_on_caller_gone)
+            retired = False
             try:
                 result = await task
                 if not future.done():
@@ -152,12 +182,17 @@ class WorkerPool:
                     f"dropping the session so the next task starts clean"
                 )
                 await worker.drop_session()
+            except NoAccountError as e:
+                self._retire(worker, query, future, e)
+                retired = True
             except Exception as e:
                 logger.error(f"{worker.id} task failed: {e}")
                 if not future.done():
                     future.set_exception(e)
             finally:
                 self.task_queue.task_done()
+            if retired:
+                break
 
         logger.info(f"{worker.id} loop exiting")
 
@@ -165,6 +200,8 @@ class WorkerPool:
         async with self._init_lock:
             if not self._initialized:
                 await self.initialize()
+            if not self._live_workers():
+                raise NoAccountError("every worker has lost its account")
 
         future = asyncio.get_running_loop().create_future()
         await self.task_queue.put((query, future))
@@ -180,6 +217,7 @@ class WorkerPool:
             await worker.close()
         self.workers = []
         self.worker_tasks = []
+        self._retired = set()
         self._initialized = False
         self._shutdown = False
 
