@@ -62,6 +62,7 @@ def _pool(worker):
     pool._initialized = True
     pool.workers = [worker]
     pool.worker_tasks = []
+    pool._retired = set()
     pool._init_lock = asyncio.Lock()
     return pool
 
