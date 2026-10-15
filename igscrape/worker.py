@@ -221,6 +221,7 @@ class Worker:
                 result: ScrapingResult = await method(
                     **task.query, **(task.runtime_options or {})
                 )
+                await session.response_interceptor.drain_hooks()
 
                 # Successful single-shot or timeline scrape
                 if result.result in SUCCESS_CASES:

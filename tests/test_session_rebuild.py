@@ -13,6 +13,7 @@ import pytest
 from playwright.async_api import Error as PWError
 
 from igscrape.models import Query, ScrapingResult
+from igscrape.response import InstagramResponseInterceptor
 from igscrape.worker import Worker
 
 
@@ -28,6 +29,7 @@ class FakeSession:
         self.searches = 0
         self.closed = 0
         self.die_after = None
+        self.response_interceptor = InstagramResponseInterceptor()
 
     def is_alive(self) -> bool:
         return self.alive

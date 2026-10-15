@@ -12,6 +12,7 @@ The replay loop feeds responses back in via `ingest_payloads()`, which reuses
 the same `_dispatch` branching as the live listener.
 """
 
+import asyncio
 import inspect
 import json
 import traceback
@@ -96,6 +97,9 @@ class InstagramResponseInterceptor:
         # Optional streaming hook fired with each batch of newly-intercepted
         # posts (raw XHR nodes, not flattened). May be sync or async.
         self.on_new_posts: Callable[[list[dict]], None | Awaitable[None]] | None = None
+        # Hook runs started by page-load responses. Nothing else awaits them, so
+        # drain_hooks() waits them out before a scrape returns.
+        self._hook_tasks: set[asyncio.Task] = set()
 
         # Replayable request templates keyed by friendly name ("user_timeline",
         # "search"). Cleared per scrape (the target id is baked into variables).
@@ -202,13 +206,26 @@ class InstagramResponseInterceptor:
 
         new_posts = self.post_metadata_list[before:]
         if new_posts and self.on_new_posts is not None:
-            try:
-                res = self.on_new_posts(new_posts)
-                if inspect.isawaitable(res):
-                    await res
-            except Exception as e:
-                logger.warning(f"on_new_posts hook raised: {e}")
-                logger.debug(traceback.format_exc())
+            task = asyncio.ensure_future(self._run_hook(self.on_new_posts, new_posts))
+            self._hook_tasks.add(task)
+            task.add_done_callback(self._hook_tasks.discard)
+            await asyncio.shield(task)
+
+    @staticmethod
+    async def _run_hook(hook: Callable, posts: list[dict]):
+        try:
+            res = hook(posts)
+            if inspect.isawaitable(res):
+                await res
+        except Exception as e:
+            logger.warning(f"on_new_posts hook raised: {e}")
+            logger.debug(traceback.format_exc())
+
+    async def drain_hooks(self):
+        """Wait for every on_new_posts run started by an intercepted response
+        (e.g. downloads for the first page) to finish."""
+        while self._hook_tasks:
+            await asyncio.gather(*self._hook_tasks)
 
     async def _capture_request(self, request: Request, data: dict):
         """Stash a replayable template (keyed by endpoint) and refresh tokens
