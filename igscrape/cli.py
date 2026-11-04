@@ -12,14 +12,17 @@ import asyncio
 import json
 import os
 import re
+from datetime import datetime
 
 import click
 from tabulate import tabulate
 
 from .accounts_pool import AccountsPool
 from .downloaders import download_images_from_posts, download_videos_from_posts
+from .exceptions import FailedLoginError
 from .exporter import export_posts, flatten_paths
 from .logger import set_log_level
+from .parsers import post_flattener
 from .utils import gather, get_home_dir_path
 
 
@@ -828,6 +831,50 @@ def scrape_search(ctx, keywords, max_posts, output_dir, max_sessions, headless, 
         log_level,
         extra_query={"max_posts": max_posts},
     )
+
+
+@scrape.command("home-feed")
+@click.argument("accounts", nargs=-1, required=True)
+@click.option("--max-posts", default=100, type=int, help="Stop after N posts (-1: no cap)")
+@click.option("--max-scrolls", default=500, type=int)
+@click.option("--output-dir", default=None)
+@click.option("--headless", is_flag=True)
+@click.option("--log-level", default="INFO")
+@click.pass_context
+def scrape_home_feed(ctx, accounts, max_posts, max_scrolls, output_dir, headless, log_level):
+    """Scroll the home feed of each pool ACCOUNT (by username), one at a time."""
+    from .browser_session import BrowserSession
+
+    set_log_level(log_level)
+    if output_dir is None:
+        output_dir = os.path.join(get_home_dir_path(), "data", "HomeFeed")
+    os.makedirs(output_dir, exist_ok=True)
+
+    async def _run():
+        pool = AccountsPool(ctx.obj["db"])
+        for name in accounts:
+            account = await pool.get_available(name)
+            if account is None:
+                click.echo(f"{name}: not available (inactive, locked, in use, or unknown).")
+                continue
+            try:
+                async with BrowserSession(account, pool, headless=headless) as session:
+                    result = await session.home_feed(
+                        max_posts=max_posts, max_scrolls=max_scrolls
+                    )
+                    await session.response_interceptor.drain_hooks()
+            except FailedLoginError as e:
+                click.echo(f"{name}: login failed: {e}")
+                continue
+            finally:
+                await pool.release_account(name)
+            result.posts = post_flattener(result.posts)
+            stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+            path = os.path.join(output_dir, f"{name}_HomeFeed_{stamp}.json")
+            result.save(path)
+            click.echo(f"{name}: {result.result} ({len(result.posts)} posts) -> {path}")
+
+    run_async(_run())
 
 
 # ============== Asset downloading ==============

@@ -21,6 +21,7 @@ from collections.abc import Awaitable, Callable
 from playwright.async_api import Page, Request, Response
 
 from .logger import logger
+from .parsers import feed_item_media
 
 # NB: no trailing slash on /api/graphql — the profile-info GraphQL response
 # (data['user'], which carries the user record + is_private) is served from
@@ -36,8 +37,10 @@ API_DIRECTORIES = (
 # Response `data` keys -> the friendly template name we replay under. The URL
 # (/api/graphql/) is shared across queries, so we identify the endpoint by the
 # response it produced and stash the request that produced it.
+# The logged-in account's own home feed.
+HOME_FEED_DATA_KEY = "xdt_api__v1__feed__timeline__connection"
 FEED_DATA_KEYS = (
-    "xdt_api__v1__feed__timeline__connection",
+    HOME_FEED_DATA_KEY,
     "xdt_api__v1__feed__user_timeline_graphql_connection",
 )
 SEARCH_DATA_KEYS = ("xdt_fbsearch__top_serp_graphql",)
@@ -52,6 +55,7 @@ ENDPOINT_POST_KEYS = {
     "PostByShortcode": (SHORTCODE_DATA_KEY,),
     "Search": SEARCH_DATA_KEYS,
     "Chaining": (),
+    "HomeFeed": (HOME_FEED_DATA_KEY,),
 }
 POST_DATA_KEYS = FEED_DATA_KEYS + SEARCH_DATA_KEYS + (SHORTCODE_DATA_KEY,)
 
@@ -81,7 +85,7 @@ def _post_id(node: dict) -> str | None:
     pid = node.get("pk") or node.get("id")
     if pid is not None:
         return str(pid)
-    media = node.get("media") or {}
+    media = feed_item_media(node) or {}
     pid = media.get("pk") or media.get("id")
     return str(pid) if pid is not None else None
 
@@ -337,6 +341,18 @@ class InstagramResponseInterceptor:
                 logger.debug(traceback.format_exc())
         return self.post_metadata_list[before:]
 
+    async def ingest_and_notify(self, payloads: list[dict]) -> list[dict]:
+        """`ingest_payloads`, then fire `on_new_posts` the way a live response
+        would. For payloads that arrive outside the page listener (embedded HTML,
+        the phone transport) but should stream like intercepted ones."""
+        new_posts = self.ingest_payloads(payloads)
+        if new_posts and self.on_new_posts is not None:
+            task = asyncio.ensure_future(self._run_hook(self.on_new_posts, new_posts))
+            self._hook_tasks.add(task)
+            task.add_done_callback(self._hook_tasks.discard)
+            await asyncio.shield(task)
+        return new_posts
+
     def _dispatch(self, data: dict):
         """Route a response payload's `data` dict to the right accumulator."""
         keys = data.keys()
@@ -396,7 +412,8 @@ class InstagramResponseInterceptor:
                 continue
             typename = node.get("__typename")
             if typename == "XDTFeedItem":
-                if node.get("media") is not None:
+                # Suggested posts carry their media under explore_story.
+                if node.get("media") is not None or feed_item_media(node) is not None:
                     self._add_post(node)
             elif typename == "XDTMediaDict":
                 self._add_post(node)

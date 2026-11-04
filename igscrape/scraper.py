@@ -17,6 +17,7 @@ from pathlib import Path
 
 from .accounts_pool import AccountsPool
 from .browser_session import SEARCH_NO_PROGRESS_STREAK
+from .home_feed import HOME_FEED_MAX_SCROLLS, HOME_FEED_NO_PROGRESS_STREAK
 from .logger import logger
 from .models import Query, ScrapingResult
 from .pagination import DEFAULT_PAGE_COUNT
@@ -156,6 +157,40 @@ class InstagramScraper:
                     "max_posts": max_posts,
                     "max_no_progress_streak": max_no_progress_streak,
                     "page_count": page_count,
+                },
+                params={},
+                runtime_options={
+                    "on_new_posts": on_new_posts,
+                    "download_videos": download_videos,
+                    "video_dir": video_dir,
+                    "jsonl_path": jsonl_path,
+                },
+            )
+        )
+
+    async def home_feed(
+        self,
+        max_posts: int = -1,
+        max_scrolls: int = HOME_FEED_MAX_SCROLLS,
+        max_no_progress_streak: int = HOME_FEED_NO_PROGRESS_STREAK,
+        on_new_posts: Callable[[list[dict]], None | Awaitable[None]] | None = None,
+        download_videos: bool = False,
+        video_dir: str | Path | None = None,
+        jsonl_path: str | Path | None = None,
+    ) -> ScrapingResult:
+        """Scroll the home feed of whichever pool account the task lands on.
+
+        The account whose feed it is goes in `result.query.query["account"]`; a
+        worker that rotates accounts on failure collects the new account's feed.
+        Use `igscrape scrape home-feed <account>` to pick the account.
+        """
+        return await self._submit(
+            Query(
+                endpoint="HomeFeed",
+                query={
+                    "max_posts": max_posts,
+                    "max_scrolls": max_scrolls,
+                    "max_no_progress_streak": max_no_progress_streak,
                 },
                 params={},
                 runtime_options={

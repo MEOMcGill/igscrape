@@ -28,6 +28,7 @@ class Query:
         "PostByShortcode": ["shortcode"],
         "Chaining": ["handle"],
         "Search": ["keyword"],
+        "HomeFeed": [],
     }
 
     endpoint: str
