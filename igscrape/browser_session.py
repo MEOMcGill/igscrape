@@ -33,6 +33,13 @@ from .accounts_pool import AccountsPool
 from .downloaders import download_videos_from_posts
 from .exceptions import FailedLoginError, RateLimitError
 from .exporter import append_jsonl
+from .home_feed import (
+    EMBEDDED_FEED_JS,
+    HOME_FEED_MAX_SCROLLS,
+    HOME_FEED_NO_PROGRESS_STREAK,
+    parse_embedded_feed_result,
+    scroll_feed,
+)
 from .logger import logger
 from .models import Query, ScrapingResult
 from .pagination import (
@@ -519,8 +526,8 @@ class BrowserSession:
         logger.debug(f"goto({url})")
         await self.page.goto(url, timeout=timeout, wait_until="domcontentloaded")
 
+    @staticmethod
     def _build_stream_hook(
-        self,
         on_new_posts: Callable | None,
         download_videos: bool,
         video_dir: str | Path | None,
@@ -1436,3 +1443,111 @@ class BrowserSession:
             return _result("timeout error")
         return _result(code)
 
+
+    # ==================== Home feed ====================
+
+    async def _dismiss_not_now(self):
+        """Close a 'Turn on notifications' style dialog, which blocks scrolling."""
+        not_now = self.page.get_by_role("button", name="Not Now")
+        try:
+            if await not_now.count() > 0 and await not_now.first.is_visible():
+                await not_now.first.click()
+                await asyncio.sleep(1.5)
+        except Exception:
+            pass
+
+    async def _scroll_feed_once(self):
+        """Roughly a screen's worth of wheel scrolling, in a few uneven steps."""
+        try:
+            for _ in range(random.randint(2, 4)):
+                await self.page.mouse.wheel(0, random.randint(250, 450))
+                await asyncio.sleep(random.uniform(0.1, 0.4))
+        except Exception as e:
+            logger.debug(f"feed scroll failed: {e}")
+
+    async def home_feed(
+        self,
+        max_posts: int = -1,
+        max_scrolls: int = HOME_FEED_MAX_SCROLLS,
+        max_no_progress_streak: int = HOME_FEED_NO_PROGRESS_STREAK,
+        on_new_posts: Callable[[list[dict]], None | Awaitable[None]] | None = None,
+        download_videos: bool = False,
+        video_dir: str | Path | None = None,
+        jsonl_path: str | Path | None = None,
+    ) -> ScrapingResult:
+        """Scroll the logged-in account's home feed, recording the posts it
+        serves in feed order.
+
+        Collection is real scrolling, not replay, so the result is what the
+        account would see. Stops on `max_posts`, `max_scrolls`, or
+        `max_no_progress_streak` scrolls in a row that load nothing new.
+        Streaming options behave as in user_timeline.
+        """
+        self.endpoint = "HomeFeed"
+        self.response_interceptor.flush(self.endpoint)
+        effective_cb = self._build_stream_hook(
+            on_new_posts, download_videos, video_dir, jsonl_path
+        )
+        self.response_interceptor.on_new_posts = effective_cb
+
+        start_time = datetime.now(timezone.utc)
+        query = Query(
+            endpoint="HomeFeed",
+            query={"account": self.account.username, "max_posts": max_posts},
+            params={},
+        )
+
+        def _result(code: str) -> ScrapingResult:
+            return ScrapingResult(
+                query=query,
+                result=code,
+                posts=list(self.response_interceptor.post_metadata_list),
+                users=list(self.response_interceptor.user_metadata_list),
+                time_started=start_time,
+                time_taken=datetime.now(timezone.utc) - start_time,
+            )
+
+        try:
+            await self._goto(BASE_URL)
+        except PWTimeoutError:
+            return _result("timeout error")
+        await asyncio.sleep(5)
+        if not await self._reauth_if_bounced(BASE_URL):
+            return _result("logged out while scraping")
+        if not await self._is_logged_in(timeout=15):
+            return _result("logged out while scraping")
+        await self._dismiss_not_now()
+
+        try:
+            raw = await self.page.evaluate(EMBEDDED_FEED_JS)
+            await self.response_interceptor.ingest_and_notify(
+                parse_embedded_feed_result(raw)
+            )
+        except Exception as e:
+            logger.debug(f"embedded home feed not read: {e}")
+
+        scrolls = 0
+
+        async def _count_scroll():
+            nonlocal scrolls
+            scrolls += 1
+            await self.pool.update_scroll_count(self.account.username, self.endpoint, 1)
+            # A long feed can outlast the account lease the run started with.
+            if scrolls % 25 == 0:
+                await self.pool.renew_lease(self.account.username)
+
+        try:
+            code = await scroll_feed(
+                scroll_once=self._scroll_feed_once,
+                interceptor=self.response_interceptor,
+                max_posts=max_posts,
+                max_scrolls=max_scrolls,
+                max_no_progress_streak=max_no_progress_streak,
+                label=f"home_feed:{self.account.username}",
+                on_scroll=_count_scroll,
+            )
+        except PWTimeoutError:
+            return _result("timeout error")
+        if not self.response_interceptor.post_metadata_list:
+            return _result("no posts")
+        return _result(code)

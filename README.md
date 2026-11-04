@@ -42,6 +42,7 @@ for Facebook, [pytok](https://github.com/networkdynamics/pytok) for TikTok and
 | A single post by shortcode | `scraper.post_by_shortcode(shortcode)` | `igscrape scrape post <shortcode>...` |
 | Accounts recommended alongside a handle | `scraper.chaining(handle)` | `igscrape scrape chaining <handle>...` |
 | Posts from keyword search | `scraper.search(keyword, max_posts=N)` | `igscrape scrape search <keyword>...` |
+| The logged-in account's own home feed, in feed order | `session.home_feed(max_posts=N)` | `igscrape scrape home-feed <account>...` |
 
 Every call returns a `ScrapingResult` with `.posts`, `.users`, `.result` (a
 result code, see below), `.time_started`, and `.time_taken`.

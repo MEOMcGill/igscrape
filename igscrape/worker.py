@@ -96,6 +96,7 @@ class Worker:
         "PostByShortcode": "post_by_shortcode",
         "Chaining": "chaining",
         "Search": "search",
+        "HomeFeed": "home_feed",
     }
 
     def __init__(
@@ -243,10 +244,9 @@ class Worker:
                             user_ids=set(user_records),
                             user_records=user_records,
                         )
-                    # Search results aren't from one author, so only flatten —
-                    # no authorship filter. Posts are already XDTMediaDict, so
-                    # post_flattener passes them through unchanged.
-                    elif task.endpoint == "Search":
+                    # Search and home-feed posts aren't from one author, so only
+                    # flatten — no authorship filter.
+                    elif task.endpoint in ("Search", "HomeFeed"):
                         result.posts = post_flattener(result.posts)
                     self.handles_scraped += 1
                     return result

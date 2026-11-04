@@ -237,10 +237,12 @@ class AccountsPool:
             )
         return Account.from_rs(rs) if rs else None
 
-    async def get_available(self) -> Account | None:
+    async def get_available(self, username: str | None = None) -> Account | None:
+        """Claim an available account, or only `username` when it is given."""
+        only = f"AND {self._id_cond(username)}" if username else ""
         q = f"""
         SELECT username FROM accounts
-        WHERE active = true
+        WHERE active = true {only}
           AND (
                 in_use = false
                 -- the holder stopped renewing, so it is gone

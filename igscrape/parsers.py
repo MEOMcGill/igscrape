@@ -10,10 +10,21 @@ from bs4 import BeautifulSoup
 from .logger import logger
 
 
+def feed_item_media(item: dict) -> dict | None:
+    """An XDTFeedItem's media: `media`, or `explore_story.media` for a
+    home-feed suggestion."""
+    media = item.get("media")
+    if media is not None:
+        return media
+    story = item.get("explore_story")
+    return story.get("media") if isinstance(story, dict) else None
+
+
 def post_flattener(posts: list[dict]) -> list[dict]:
     """Resolve XDTFeedItem → its nested media; pass XDTMediaDict through.
 
-    From post_scraper.py:1061-1073.
+    A home-feed suggestion comes out with `feed_inventory_source` set (e.g.
+    "explore_story"); posts from followed accounts don't have the key.
     """
     new_posts: list[dict] = []
     for post in posts:
@@ -21,7 +32,10 @@ def post_flattener(posts: list[dict]) -> list[dict]:
         if typename == "XDTMediaDict":
             new_posts.append(post)
         elif typename == "XDTFeedItem":
-            media = post.get("media")
+            media = feed_item_media(post)
+            story = post.get("explore_story")
+            if media is not None and post.get("media") is None and isinstance(story, dict):
+                media = {**media, "feed_inventory_source": story.get("inventory_source")}
             if media is not None:
                 new_posts.append(media)
             else:
