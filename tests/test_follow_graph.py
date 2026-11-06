@@ -52,20 +52,20 @@ class FakeDriver:
 
 def test_following_pages_until_no_cursor_and_dedupes():
     driver = FakeDriver([_page(["1", "2"], "c1"), _page(["2", "3"])])
-    users = asyncio.run(fg.list_following(driver, fallback_app_id="app"))
+    users = asyncio.run(fg.list_following(driver.evaluate_json, fallback_app_id="app"))
     assert [u["pk"] for u in users] == ["1", "2", "3"]
     assert '"c1"' in driver.requests[1] and "null" in driver.requests[0]
 
 
 def test_following_stops_at_max_users():
     driver = FakeDriver([_page(["1", "2"], "c1"), _page(["3"])])
-    users = asyncio.run(fg.list_following(driver, fallback_app_id="app", max_users=2))
+    users = asyncio.run(fg.list_following(driver.evaluate_json, fallback_app_id="app", max_users=2))
     assert len(users) == 2 and len(driver.requests) == 1
 
 
 def test_following_needs_a_logged_in_page():
     with pytest.raises(FailedLoginError):
-        asyncio.run(fg.list_following(FakeDriver(user_id=""), fallback_app_id="app"))
+        asyncio.run(fg.list_following(FakeDriver(user_id="").evaluate_json, fallback_app_id="app"))
 
 
 @pytest.mark.parametrize(
@@ -83,25 +83,31 @@ def test_following_page_failures_raise(status, body, exc):
         fg.parse_following_page(status, body)
 
 
+def _follow(driver, handle, **kw):
+    return fg.follow(
+        handle, goto=driver.goto, evaluate_json=driver.evaluate_json, click=driver.click, **kw
+    )
+
+
 def _state(state, **kw):
     return {"state": state, "x": 10, "y": 20, **kw}
 
 
 def test_follow_clicks_then_confirms_on_reload():
     driver = FakeDriver(states=[_state("follow"), _state("following"), _state("following")])
-    assert asyncio.run(fg.follow(driver, "@someone")) == "followed"
+    assert asyncio.run(_follow(driver, "@someone")) == "followed"
     assert driver.clicks == [(10, 20)]
     assert driver.visits == ["https://www.instagram.com/someone/"] * 2
 
 
 def test_follow_private_account_is_requested():
     driver = FakeDriver(states=[_state("follow"), _state("requested"), _state("requested")])
-    assert asyncio.run(fg.follow(driver, "someone")) == "requested"
+    assert asyncio.run(_follow(driver, "someone")) == "requested"
 
 
 def test_follow_that_reverts_on_reload_did_not_stick():
     driver = FakeDriver(states=[_state("follow"), _state("following"), _state("follow")])
-    assert asyncio.run(fg.follow(driver, "someone")) == "follow did not stick"
+    assert asyncio.run(_follow(driver, "someone")) == "follow did not stick"
 
 
 @pytest.mark.parametrize(
@@ -115,15 +121,15 @@ def test_follow_that_reverts_on_reload_did_not_stick():
 )
 def test_follow_does_not_click_when_nothing_to_do(state, code):
     driver = FakeDriver(states=[state])
-    assert asyncio.run(fg.follow(driver, "someone")) == code
+    assert asyncio.run(_follow(driver, "someone")) == code
     assert driver.clicks == []
 
 
 def test_follow_without_a_button_gives_up():
     driver = FakeDriver(states=[{"state": None}])
-    assert asyncio.run(fg.follow(driver, "someone", load_timeout=0)) == "no follow button"
+    assert asyncio.run(_follow(driver, "someone", load_timeout=0)) == "no follow button"
 
 
 def test_follow_blocked_after_click():
     driver = FakeDriver(states=[_state("follow"), _state("follow", blocked=True)])
-    assert asyncio.run(fg.follow(driver, "someone")) == "action blocked"
+    assert asyncio.run(_follow(driver, "someone")) == "action blocked"

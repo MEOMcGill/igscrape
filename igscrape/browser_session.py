@@ -1564,35 +1564,27 @@ class BrowserSession:
         if not await self._is_logged_in(timeout=15):
             raise FailedLoginError(f"{self.account.username} is not logged in")
 
+    async def _evaluate_json(self, expression: str) -> dict:
+        raw = await self.page.evaluate(expression)
+        try:
+            return json.loads(raw) if raw else {}
+        except (json.JSONDecodeError, TypeError):
+            return {}
+
     async def following(self, max_users: int = -1) -> list[dict]:
         """The accounts this session's account follows, as Instagram user records."""
         await self._on_logged_in_page()
         return await list_following(
-            _PlaywrightDriver(self), fallback_app_id=DESKTOP_APP_ID, max_users=max_users
+            self._evaluate_json, fallback_app_id=DESKTOP_APP_ID, max_users=max_users
         )
 
     async def follow(self, handle: str) -> str:
         """Follow `handle` from its profile page; see follow_graph.follow for codes."""
         await self._on_logged_in_page()
         await self._dismiss_not_now()
-        return await follow(_PlaywrightDriver(self), handle)
-
-
-class _PlaywrightDriver:
-    """follow_graph.PageDriver over a BrowserSession's page."""
-
-    def __init__(self, session: BrowserSession):
-        self._session = session
-
-    async def goto(self, url: str) -> None:
-        await self._session._goto(url)
-
-    async def evaluate_json(self, expression: str) -> dict:
-        raw = await self._session.page.evaluate(expression)
-        try:
-            return json.loads(raw) if raw else {}
-        except (json.JSONDecodeError, TypeError):
-            return {}
-
-    async def click(self, x: float, y: float) -> None:
-        await self._session.page.mouse.click(x, y)
+        return await follow(
+            handle,
+            goto=self._goto,
+            evaluate_json=self._evaluate_json,
+            click=self.page.mouse.click,
+        )

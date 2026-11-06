@@ -1,7 +1,7 @@
 """Read who the logged-in account follows, and follow accounts as it.
 
-Transport-agnostic: BrowserSession and PhoneSession each wrap their page in a
-`PageDriver`, and the logic lives here once.
+Transport-agnostic: BrowserSession and PhoneSession each pass in their own
+`goto`, `evaluate_json` and `click`, and the logic lives here once.
 
 The following list is read with an in-page `fetch` of the web API (outside the
 page the same URL answers 200 with an HTML shell). Following someone is a real
@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
-from typing import Protocol
+from collections.abc import Awaitable, Callable
 
 from .exceptions import FailedLoginError, RateLimitError
 from .logger import logger
@@ -28,12 +28,8 @@ MOBILE_WEB_APP_ID = "1217981644879628"
 FOLLOWING_PAGE_SIZE = 12
 
 
-class PageDriver(Protocol):
-    async def goto(self, url: str) -> None: ...
-
-    async def evaluate_json(self, expression: str) -> dict: ...
-
-    async def click(self, x: float, y: float) -> None: ...
+# Evaluates a JS expression that returns a JSON string, and parses it.
+EvaluateJson = Callable[[str], Awaitable[dict]]
 
 
 _VIEWER_JS = """(() => {
@@ -92,9 +88,9 @@ _PROFILE_STATE_JS = """(() => {
 })()"""
 
 
-async def viewer(driver: PageDriver, fallback_app_id: str) -> tuple[str, str]:
+async def viewer(evaluate_json: EvaluateJson, fallback_app_id: str) -> tuple[str, str]:
     """(user id, app id) of the logged-in account, read from the open page."""
-    info = await driver.evaluate_json(_VIEWER_JS)
+    info = await evaluate_json(_VIEWER_JS)
     user_id = info.get("user_id") or ""
     if not user_id:
         raise FailedLoginError("no ds_user_id cookie; the page is not logged in")
@@ -133,7 +129,7 @@ def parse_following_page(status: int, body: str) -> tuple[list[dict], str | None
 
 
 async def list_following(
-    driver: PageDriver,
+    evaluate_json: EvaluateJson,
     *,
     fallback_app_id: str,
     max_users: int = -1,
@@ -142,15 +138,15 @@ async def list_following(
 ) -> list[dict]:
     """Every account the logged-in account follows, as Instagram's user records.
 
-    The driver's page must already be on instagram.com and logged in.
+    The page must already be on instagram.com and logged in.
     `max_users` < 0 means no cap.
     """
-    user_id, app_id = await viewer(driver, fallback_app_id)
+    user_id, app_id = await viewer(evaluate_json, fallback_app_id)
     users: list[dict] = []
     seen: set[str] = set()
     max_id: str | None = None
     while True:
-        raw = await driver.evaluate_json(
+        raw = await evaluate_json(
             _FOLLOWING_PAGE_JS
             % (json.dumps(user_id), json.dumps(max_id), page_size, json.dumps(app_id))
         )
@@ -169,22 +165,30 @@ async def list_following(
 
 
 async def _profile_state(
-    driver: PageDriver, timeout: float, until=lambda s: s.get("state")
+    evaluate_json: EvaluateJson, timeout: float, until=lambda s: s.get("state")
 ) -> dict:
     """Poll the profile's follow-button state until `until(state)` or timeout."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     state: dict = {}
     while loop.time() < deadline:
-        state = await driver.evaluate_json(_PROFILE_STATE_JS)
+        state = await evaluate_json(_PROFILE_STATE_JS)
         if until(state) or state.get("blocked") or state.get("unavailable"):
             return state
         await asyncio.sleep(1.0)
     return state
 
 
-async def follow(driver: PageDriver, handle: str, load_timeout: float = 25.0) -> str:
-    """Follow `handle` by clicking its profile's Follow button.
+async def follow(
+    handle: str,
+    *,
+    goto: Callable[[str], Awaitable[None]],
+    evaluate_json: EvaluateJson,
+    click: Callable[[float, float], Awaitable[None]],
+    load_timeout: float = 25.0,
+) -> str:
+    """Follow `handle` by clicking its profile's Follow button at page
+    coordinates with `click`.
 
     Returns one of: 'followed', 'requested' (a private account), 'already
     following', 'already requested', 'profile is not available', 'no follow
@@ -192,8 +196,8 @@ async def follow(driver: PageDriver, handle: str, load_timeout: float = 25.0) ->
     """
     handle = handle.lstrip("@").strip()
     url = f"{BASE_URL}{handle}/"
-    await driver.goto(url)
-    state = await _profile_state(driver, load_timeout)
+    await goto(url)
+    state = await _profile_state(evaluate_json, load_timeout)
     if state.get("unavailable"):
         return "profile is not available"
     if state.get("blocked"):
@@ -207,9 +211,9 @@ async def follow(driver: PageDriver, handle: str, load_timeout: float = 25.0) ->
         return "no follow button"
 
     await asyncio.sleep(random.uniform(0.8, 2.5))
-    await driver.click(state["x"], state["y"])
+    await click(state["x"], state["y"])
     after = await _profile_state(
-        driver, 10.0, until=lambda s: s.get("state") in ("following", "requested")
+        evaluate_json, 10.0, until=lambda s: s.get("state") in ("following", "requested")
     )
     if after.get("blocked"):
         return "action blocked"
@@ -217,8 +221,8 @@ async def follow(driver: PageDriver, handle: str, load_timeout: float = 25.0) ->
     # The button flips optimistically, and a blocked follow flips back later,
     # so trust only what a fresh load of the profile shows.
     await asyncio.sleep(random.uniform(3.0, 6.0))
-    await driver.goto(url)
-    final = await _profile_state(driver, load_timeout)
+    await goto(url)
+    final = await _profile_state(evaluate_json, load_timeout)
     if final.get("blocked"):
         return "action blocked"
     if final.get("state") == "following":

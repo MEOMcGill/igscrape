@@ -321,28 +321,14 @@ class PhoneSession:
         """The accounts this phone's account follows, as Instagram user records."""
         await self._logged_in_tab()
         return await list_following(
-            _PhoneDriver(self), fallback_app_id=MOBILE_WEB_APP_ID, max_users=max_users
+            self._evaluate_json, fallback_app_id=MOBILE_WEB_APP_ID, max_users=max_users
         )
 
     async def follow(self, handle: str) -> str:
         """Follow `handle` with a tap on its profile; see follow_graph.follow for codes."""
         await self._logged_in_tab()
-        code = await follow(_PhoneDriver(self), handle)
+        code = await follow(
+            handle, goto=self._goto, evaluate_json=self._evaluate_json, click=self._tap
+        )
         await self.save_cookies()
         return code
-
-
-class _PhoneDriver:
-    """follow_graph.PageDriver over a PhoneSession's tab."""
-
-    def __init__(self, phone: PhoneSession):
-        self._phone = phone
-
-    async def goto(self, url: str) -> None:
-        await self._phone._goto(url)
-
-    async def evaluate_json(self, expression: str) -> dict:
-        return await self._phone._evaluate_json(expression)
-
-    async def click(self, x: float, y: float) -> None:
-        await self._phone._tap(x, y)
