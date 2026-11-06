@@ -111,6 +111,35 @@ def test_scroll_stops_at_max_scrolls():
     assert scrolls == 5
 
 
+def test_scroll_that_hangs_ends_with_timeout_error():
+    interceptor = InstagramResponseInterceptor()
+    interceptor.flush("HomeFeed")
+
+    async def hang():
+        await asyncio.sleep(10)
+
+    code = asyncio.run(scroll_feed(
+        scroll_once=hang, interceptor=interceptor, dwell=(0, 0), scroll_timeout=0.05
+    ))
+    assert code == "timeout error"
+
+
+def test_breather_pauses_every_n_scrolls(monkeypatch):
+    pauses = []
+    real_sleep = asyncio.sleep
+
+    async def record(seconds):
+        pauses.append(seconds)
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", record)
+    interceptor = InstagramResponseInterceptor()
+    interceptor.flush("HomeFeed")
+    _scroll(interceptor, [[str(i)] for i in range(100)], max_scrolls=7,
+            breather_every=3, breather=(9.5, 9.5))
+    assert pauses.count(9.5) == 2
+
+
 def test_home_feed_query_needs_no_fields():
     Query(endpoint="HomeFeed", query={}, params={})
 
