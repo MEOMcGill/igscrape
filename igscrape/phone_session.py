@@ -21,6 +21,8 @@ from pathlib import Path
 from .account import Account
 from .accounts_pool import AccountsPool
 from .browser_session import BASE_URL, BrowserSession
+from .exceptions import FailedLoginError
+from .follow_graph import MOBILE_WEB_APP_ID, follow, list_following
 from .home_feed import (
     EMBEDDED_FEED_JS,
     HOME_FEED_MAX_SCROLLS,
@@ -300,3 +302,47 @@ class PhoneSession:
         if not interceptor.post_metadata_list:
             return _result("no posts")
         return _result(code)
+
+    async def _goto(self, url: str) -> None:
+        await self._cdp.call(
+            "Page.navigate", {"url": url}, session_id=self._session_id, timeout=90
+        )
+        await asyncio.sleep(3.0)
+        await self._dismiss_popups()
+
+    async def _logged_in_tab(self) -> None:
+        if self._cdp is None:
+            raise PhoneError("PhoneSession used outside its `async with` block")
+        if not await self._open_home():
+            raise FailedLoginError(f"{self.account.username} is not logged in on {self.serial}")
+        await self._dismiss_popups()
+
+    async def following(self, max_users: int = -1) -> list[dict]:
+        """The accounts this phone's account follows, as Instagram user records."""
+        await self._logged_in_tab()
+        return await list_following(
+            _PhoneDriver(self), fallback_app_id=MOBILE_WEB_APP_ID, max_users=max_users
+        )
+
+    async def follow(self, handle: str) -> str:
+        """Follow `handle` with a tap on its profile; see follow_graph.follow for codes."""
+        await self._logged_in_tab()
+        code = await follow(_PhoneDriver(self), handle)
+        await self.save_cookies()
+        return code
+
+
+class _PhoneDriver:
+    """follow_graph.PageDriver over a PhoneSession's tab."""
+
+    def __init__(self, phone: PhoneSession):
+        self._phone = phone
+
+    async def goto(self, url: str) -> None:
+        await self._phone._goto(url)
+
+    async def evaluate_json(self, expression: str) -> dict:
+        return await self._phone._evaluate_json(expression)
+
+    async def click(self, x: float, y: float) -> None:
+        await self._phone._tap(x, y)

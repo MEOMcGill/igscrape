@@ -7,6 +7,7 @@ termination conditions.
 import asyncio
 import copy
 import inspect
+import json
 import random
 import re
 from collections.abc import Awaitable, Callable
@@ -33,6 +34,7 @@ from .accounts_pool import AccountsPool
 from .downloaders import download_videos_from_posts
 from .exceptions import FailedLoginError, RateLimitError
 from .exporter import append_jsonl
+from .follow_graph import DESKTOP_APP_ID, follow, list_following
 from .home_feed import (
     EMBEDDED_FEED_JS,
     HOME_FEED_MAX_SCROLLS,
@@ -1551,3 +1553,46 @@ class BrowserSession:
         if not self.response_interceptor.post_metadata_list:
             return _result("no posts")
         return _result(code)
+
+
+    # ==================== Follow graph ====================
+
+    async def _on_logged_in_page(self):
+        """Land on instagram.com, raising FailedLoginError if logged out."""
+        if not self.page.url.startswith(BASE_URL):
+            await self._goto(BASE_URL)
+        if not await self._is_logged_in(timeout=15):
+            raise FailedLoginError(f"{self.account.username} is not logged in")
+
+    async def following(self, max_users: int = -1) -> list[dict]:
+        """The accounts this session's account follows, as Instagram user records."""
+        await self._on_logged_in_page()
+        return await list_following(
+            _PlaywrightDriver(self), fallback_app_id=DESKTOP_APP_ID, max_users=max_users
+        )
+
+    async def follow(self, handle: str) -> str:
+        """Follow `handle` from its profile page; see follow_graph.follow for codes."""
+        await self._on_logged_in_page()
+        await self._dismiss_not_now()
+        return await follow(_PlaywrightDriver(self), handle)
+
+
+class _PlaywrightDriver:
+    """follow_graph.PageDriver over a BrowserSession's page."""
+
+    def __init__(self, session: BrowserSession):
+        self._session = session
+
+    async def goto(self, url: str) -> None:
+        await self._session._goto(url)
+
+    async def evaluate_json(self, expression: str) -> dict:
+        raw = await self._session.page.evaluate(expression)
+        try:
+            return json.loads(raw) if raw else {}
+        except (json.JSONDecodeError, TypeError):
+            return {}
+
+    async def click(self, x: float, y: float) -> None:
+        await self._session.page.mouse.click(x, y)
