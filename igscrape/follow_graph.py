@@ -14,9 +14,11 @@ import asyncio
 import json
 import random
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 
 from .exceptions import FailedLoginError, RateLimitError
 from .logger import logger
+from .models import Query, ScrapingResult
 
 BASE_URL = "https://www.instagram.com/"
 
@@ -192,7 +194,8 @@ async def follow(
 
     Returns one of: 'followed', 'requested' (a private account), 'already
     following', 'already requested', 'profile is not available', 'no follow
-    button' (e.g. your own profile), 'action blocked', 'follow did not stick'.
+    button' (e.g. your own profile). Raises RateLimitError when Instagram
+    blocks the follow, whether openly or by reverting it.
     """
     handle = handle.lstrip("@").strip()
     url = f"{BASE_URL}{handle}/"
@@ -201,7 +204,7 @@ async def follow(
     if state.get("unavailable"):
         return "profile is not available"
     if state.get("blocked"):
-        return "action blocked"
+        raise RateLimitError(f"follow @{handle}: action blocked")
     current = state.get("state")
     if current == "following":
         return "already following"
@@ -216,7 +219,7 @@ async def follow(
         evaluate_json, 10.0, until=lambda s: s.get("state") in ("following", "requested")
     )
     if after.get("blocked"):
-        return "action blocked"
+        raise RateLimitError(f"follow @{handle}: action blocked")
 
     # The button flips optimistically, and a blocked follow flips back later,
     # so trust only what a fresh load of the profile shows.
@@ -224,10 +227,51 @@ async def follow(
     await goto(url)
     final = await _profile_state(evaluate_json, load_timeout)
     if final.get("blocked"):
-        return "action blocked"
+        raise RateLimitError(f"follow @{handle}: action blocked")
     if final.get("state") == "following":
         return "followed"
     if final.get("state") == "requested":
         return "requested"
-    logger.warning(f"follow @{handle}: button reads {final.get('state')!r} after reload")
-    return "follow did not stick"
+    raise RateLimitError(
+        f"follow @{handle}: reverted to {final.get('state')!r} after reload"
+    )
+
+
+async def following_result(
+    evaluate_json: EvaluateJson,
+    *,
+    query: dict,
+    fallback_app_id: str,
+    max_users: int = -1,
+) -> ScrapingResult:
+    """list_following as a Following ScrapingResult, the accounts in `.users`."""
+    start = datetime.now(timezone.utc)
+    users = await list_following(
+        evaluate_json, fallback_app_id=fallback_app_id, max_users=max_users
+    )
+    return ScrapingResult(
+        query=Query(endpoint="Following", query={**query, "max_users": max_users}, params={}),
+        result="success",
+        users=users,
+        time_started=start,
+        time_taken=datetime.now(timezone.utc) - start,
+    )
+
+
+async def follow_result(
+    handle: str,
+    *,
+    query: dict,
+    goto: Callable[[str], Awaitable[None]],
+    evaluate_json: EvaluateJson,
+    click: Callable[[float, float], Awaitable[None]],
+) -> ScrapingResult:
+    """follow() as a Follow ScrapingResult, its status in `.result`."""
+    start = datetime.now(timezone.utc)
+    code = await follow(handle, goto=goto, evaluate_json=evaluate_json, click=click)
+    return ScrapingResult(
+        query=Query(endpoint="Follow", query={**query, "handle": handle}, params={}),
+        result=code,
+        time_started=start,
+        time_taken=datetime.now(timezone.utc) - start,
+    )

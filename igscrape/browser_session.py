@@ -34,7 +34,7 @@ from .accounts_pool import AccountsPool
 from .downloaders import download_videos_from_posts
 from .exceptions import FailedLoginError, RateLimitError
 from .exporter import append_jsonl
-from .follow_graph import DESKTOP_APP_ID, follow, list_following
+from .follow_graph import DESKTOP_APP_ID, follow_result, following_result
 from .home_feed import (
     EMBEDDED_FEED_JS,
     HOME_FEED_MAX_SCROLLS,
@@ -1571,19 +1571,25 @@ class BrowserSession:
         except (json.JSONDecodeError, TypeError):
             return {}
 
-    async def following(self, max_users: int = -1) -> list[dict]:
-        """The accounts this session's account follows, as Instagram user records."""
+    async def following(self, max_users: int = -1) -> ScrapingResult:
+        """The accounts this session's account follows, in `.users`."""
+        self.endpoint = "Following"
         await self._on_logged_in_page()
-        return await list_following(
-            self._evaluate_json, fallback_app_id=DESKTOP_APP_ID, max_users=max_users
+        return await following_result(
+            self._evaluate_json,
+            query={"account": self.account.username},
+            fallback_app_id=DESKTOP_APP_ID,
+            max_users=max_users,
         )
 
-    async def follow(self, handle: str) -> str:
+    async def follow(self, handle: str) -> ScrapingResult:
         """Follow `handle` from its profile page; see follow_graph.follow for codes."""
+        self.endpoint = "Follow"
         await self._on_logged_in_page()
         await self._dismiss_not_now()
-        return await follow(
+        return await follow_result(
             handle,
+            query={"account": self.account.username},
             goto=self._goto,
             evaluate_json=self._evaluate_json,
             click=self.page.mouse.click,

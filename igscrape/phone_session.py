@@ -22,7 +22,7 @@ from .account import Account
 from .accounts_pool import AccountsPool
 from .browser_session import BASE_URL, BrowserSession
 from .exceptions import FailedLoginError
-from .follow_graph import MOBILE_WEB_APP_ID, follow, list_following
+from .follow_graph import MOBILE_WEB_APP_ID, follow_result, following_result
 from .home_feed import (
     EMBEDDED_FEED_JS,
     HOME_FEED_MAX_SCROLLS,
@@ -317,18 +317,26 @@ class PhoneSession:
             raise FailedLoginError(f"{self.account.username} is not logged in on {self.serial}")
         await self._dismiss_popups()
 
-    async def following(self, max_users: int = -1) -> list[dict]:
-        """The accounts this phone's account follows, as Instagram user records."""
+    async def following(self, max_users: int = -1) -> ScrapingResult:
+        """The accounts this phone's account follows, in `.users`."""
         await self._logged_in_tab()
-        return await list_following(
-            self._evaluate_json, fallback_app_id=MOBILE_WEB_APP_ID, max_users=max_users
+        return await following_result(
+            self._evaluate_json,
+            query={"account": self.account.username, "device": self.serial},
+            fallback_app_id=MOBILE_WEB_APP_ID,
+            max_users=max_users,
         )
 
-    async def follow(self, handle: str) -> str:
+    async def follow(self, handle: str) -> ScrapingResult:
         """Follow `handle` with a tap on its profile; see follow_graph.follow for codes."""
         await self._logged_in_tab()
-        code = await follow(
-            handle, goto=self._goto, evaluate_json=self._evaluate_json, click=self._tap
-        )
-        await self.save_cookies()
-        return code
+        try:
+            return await follow_result(
+                handle,
+                query={"account": self.account.username, "device": self.serial},
+                goto=self._goto,
+                evaluate_json=self._evaluate_json,
+                click=self._tap,
+            )
+        finally:
+            await self.save_cookies()

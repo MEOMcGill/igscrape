@@ -22,7 +22,7 @@ from tabulate import tabulate
 
 from .accounts_pool import AccountsPool
 from .downloaders import download_images_from_posts, download_videos_from_posts
-from .exceptions import FailedLoginError
+from .exceptions import FailedLoginError, RateLimitError
 from .exporter import export_posts, flatten_paths
 from .logger import set_log_level
 from .parsers import post_flattener
@@ -926,7 +926,7 @@ def device_options(f):
 @cli.command()
 @click.argument("account")
 @click.option("--max-users", default=-1, type=int, help="Stop after N accounts (-1: no cap)")
-@click.option("--output", default=None, help="Write the user records here as JSON")
+@click.option("--output", default=None, help="Save the result (accounts in .users) here as JSON")
 @device_options
 @click.option("--log-level", default="INFO")
 @click.pass_context
@@ -940,16 +940,15 @@ def following(ctx, account, max_users, output, phone, ssh_host, headless, log_le
             if session is None:
                 return
             try:
-                users = await session.following(max_users=max_users)
-            except FailedLoginError as e:
+                result = await session.following(max_users=max_users)
+            except (FailedLoginError, RateLimitError) as e:
                 click.echo(f"{account}: {e}")
                 return
-        click.echo(f"{account} follows {len(users)} accounts")
-        for u in users:
+        click.echo(f"{account} follows {len(result.users)} accounts")
+        for u in result.users:
             click.echo(f"  {u.get('username')}\t{u.get('full_name') or ''}")
         if output:
-            with open(output, "w") as f:
-                json.dump(users, f, indent=2)
+            result.save(output)
             click.echo(f"-> {output}")
 
     run_async(_run())
@@ -967,6 +966,8 @@ def follow(ctx, account, handles, pause, phone, ssh_host, headless, log_level):
     """Have pool ACCOUNT follow each of HANDLES, one at a time."""
     set_log_level(log_level)
 
+    from .worker import RETRY_MINUTES
+
     async def _run():
         pool = AccountsPool(ctx.obj["db"])
         async with _account_session(pool, account, phone, ssh_host, headless) as session:
@@ -976,14 +977,20 @@ def follow(ctx, account, handles, pause, phone, ssh_host, headless, log_level):
                 if i:
                     await asyncio.sleep(random.uniform(*pause))
                 try:
-                    code = await session.follow(handle)
+                    result = await session.follow(handle)
                 except FailedLoginError as e:
                     click.echo(f"{account}: {e}")
                     return
-                click.echo(f"{account} -> {handle}: {code}")
-                if code in ("action blocked", "follow did not stick"):
-                    click.echo("Stopping: Instagram is refusing follows from this account.")
+                except RateLimitError as e:
+                    await pool.lock_until(
+                        account, f"datetime('now', '+{RETRY_MINUTES} minutes')"
+                    )
+                    click.echo(
+                        f"{account} -> {handle}: {e}. Locked {account} for "
+                        f"{RETRY_MINUTES} min; stopping."
+                    )
                     return
+                click.echo(f"{account} -> {handle}: {result.result}")
 
     run_async(_run())
 

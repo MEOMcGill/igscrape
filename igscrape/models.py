@@ -29,6 +29,8 @@ class Query:
         "Chaining": ["handle"],
         "Search": ["keyword"],
         "HomeFeed": [],
+        "Following": [],
+        "Follow": ["handle"],
     }
 
     endpoint: str
@@ -90,6 +92,8 @@ class ScrapingResult:
         - 'target crashed'
         - 'logged out while scraping'
         - 'success' (for single-shot endpoints like UserProfile / PostByShortcode / Chaining)
+        - Follow only: 'followed', 'requested', 'already following',
+          'already requested', 'no follow button'
     """
 
     query: Query

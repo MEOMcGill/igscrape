@@ -97,6 +97,7 @@ class Worker:
         "Chaining": "chaining",
         "Search": "search",
         "HomeFeed": "home_feed",
+        "Following": "following",
     }
 
     def __init__(

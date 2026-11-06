@@ -105,9 +105,10 @@ def test_follow_private_account_is_requested():
     assert asyncio.run(_follow(driver, "someone")) == "requested"
 
 
-def test_follow_that_reverts_on_reload_did_not_stick():
+def test_follow_that_reverts_on_reload_is_a_block():
     driver = FakeDriver(states=[_state("follow"), _state("following"), _state("follow")])
-    assert asyncio.run(_follow(driver, "someone")) == "follow did not stick"
+    with pytest.raises(RateLimitError):
+        asyncio.run(_follow(driver, "someone"))
 
 
 @pytest.mark.parametrize(
@@ -116,7 +117,6 @@ def test_follow_that_reverts_on_reload_did_not_stick():
         (_state("following"), "already following"),
         (_state("requested"), "already requested"),
         ({"state": None, "unavailable": True}, "profile is not available"),
-        ({"state": None, "blocked": True}, "action blocked"),
     ],
 )
 def test_follow_does_not_click_when_nothing_to_do(state, code):
@@ -130,6 +130,48 @@ def test_follow_without_a_button_gives_up():
     assert asyncio.run(_follow(driver, "someone", load_timeout=0)) == "no follow button"
 
 
-def test_follow_blocked_after_click():
-    driver = FakeDriver(states=[_state("follow"), _state("follow", blocked=True)])
-    assert asyncio.run(_follow(driver, "someone")) == "action blocked"
+@pytest.mark.parametrize(
+    "states",
+    [
+        [{"state": None, "blocked": True}],
+        [_state("follow"), _state("follow", blocked=True)],
+    ],
+)
+def test_follow_action_block_raises(states):
+    with pytest.raises(RateLimitError):
+        asyncio.run(_follow(FakeDriver(states=states), "someone"))
+
+
+def test_following_result_carries_users_and_account():
+    driver = FakeDriver([_page(["1", "2"])])
+    result = asyncio.run(
+        fg.following_result(
+            driver.evaluate_json, query={"account": "me"}, fallback_app_id="app"
+        )
+    )
+    assert result.result == "success"
+    assert [u["pk"] for u in result.users] == ["1", "2"]
+    assert result.query.endpoint == "Following"
+    assert result.query.query == {"account": "me", "max_users": -1}
+
+
+def test_follow_result_carries_the_status():
+    driver = FakeDriver(states=[_state("follow"), _state("following"), _state("following")])
+    result = asyncio.run(
+        fg.follow_result(
+            "someone",
+            query={"account": "me"},
+            goto=driver.goto,
+            evaluate_json=driver.evaluate_json,
+            click=driver.click,
+        )
+    )
+    assert result.result == "followed"
+    assert result.query.query == {"account": "me", "handle": "someone"}
+
+
+def test_worker_routes_following_but_not_follow():
+    from igscrape.worker import Worker
+
+    assert Worker.ENDPOINT_METHODS["Following"] == "following"
+    assert "Follow" not in Worker.ENDPOINT_METHODS
