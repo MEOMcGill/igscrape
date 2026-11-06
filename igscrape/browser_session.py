@@ -7,6 +7,7 @@ termination conditions.
 import asyncio
 import copy
 import inspect
+import json
 import random
 import re
 from collections.abc import Awaitable, Callable
@@ -33,6 +34,7 @@ from .accounts_pool import AccountsPool
 from .downloaders import download_videos_from_posts
 from .exceptions import FailedLoginError, RateLimitError
 from .exporter import append_jsonl
+from .follow_graph import DESKTOP_APP_ID, follow_result, following_result
 from .home_feed import (
     EMBEDDED_FEED_JS,
     HOME_FEED_MAX_SCROLLS,
@@ -1551,3 +1553,44 @@ class BrowserSession:
         if not self.response_interceptor.post_metadata_list:
             return _result("no posts")
         return _result(code)
+
+
+    # ==================== Follow graph ====================
+
+    async def _on_logged_in_page(self):
+        """Land on instagram.com, raising FailedLoginError if logged out."""
+        if not self.page.url.startswith(BASE_URL):
+            await self._goto(BASE_URL)
+        if not await self._is_logged_in(timeout=15):
+            raise FailedLoginError(f"{self.account.username} is not logged in")
+
+    async def _evaluate_json(self, expression: str) -> dict:
+        raw = await self.page.evaluate(expression)
+        try:
+            return json.loads(raw) if raw else {}
+        except (json.JSONDecodeError, TypeError):
+            return {}
+
+    async def following(self, max_users: int = -1) -> ScrapingResult:
+        """The accounts this session's account follows, in `.users`."""
+        self.endpoint = "Following"
+        await self._on_logged_in_page()
+        return await following_result(
+            self._evaluate_json,
+            query={"account": self.account.username},
+            fallback_app_id=DESKTOP_APP_ID,
+            max_users=max_users,
+        )
+
+    async def follow(self, handle: str) -> ScrapingResult:
+        """Follow `handle` from its profile page; see follow_graph.follow for codes."""
+        self.endpoint = "Follow"
+        await self._on_logged_in_page()
+        await self._dismiss_not_now()
+        return await follow_result(
+            handle,
+            query={"account": self.account.username},
+            goto=self._goto,
+            evaluate_json=self._evaluate_json,
+            click=self.page.mouse.click,
+        )

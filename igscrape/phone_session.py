@@ -21,6 +21,8 @@ from pathlib import Path
 from .account import Account
 from .accounts_pool import AccountsPool
 from .browser_session import BASE_URL, BrowserSession
+from .exceptions import FailedLoginError
+from .follow_graph import MOBILE_WEB_APP_ID, follow_result, following_result
 from .home_feed import (
     EMBEDDED_FEED_JS,
     HOME_FEED_MAX_SCROLLS,
@@ -300,3 +302,41 @@ class PhoneSession:
         if not interceptor.post_metadata_list:
             return _result("no posts")
         return _result(code)
+
+    async def _goto(self, url: str) -> None:
+        await self._cdp.call(
+            "Page.navigate", {"url": url}, session_id=self._session_id, timeout=90
+        )
+        await asyncio.sleep(3.0)
+        await self._dismiss_popups()
+
+    async def _logged_in_tab(self) -> None:
+        if self._cdp is None:
+            raise PhoneError("PhoneSession used outside its `async with` block")
+        if not await self._open_home():
+            raise FailedLoginError(f"{self.account.username} is not logged in on {self.serial}")
+        await self._dismiss_popups()
+
+    async def following(self, max_users: int = -1) -> ScrapingResult:
+        """The accounts this phone's account follows, in `.users`."""
+        await self._logged_in_tab()
+        return await following_result(
+            self._evaluate_json,
+            query={"account": self.account.username, "device": self.serial},
+            fallback_app_id=MOBILE_WEB_APP_ID,
+            max_users=max_users,
+        )
+
+    async def follow(self, handle: str) -> ScrapingResult:
+        """Follow `handle` with a tap on its profile; see follow_graph.follow for codes."""
+        await self._logged_in_tab()
+        try:
+            return await follow_result(
+                handle,
+                query={"account": self.account.username, "device": self.serial},
+                goto=self._goto,
+                evaluate_json=self._evaluate_json,
+                click=self._tap,
+            )
+        finally:
+            await self.save_cookies()

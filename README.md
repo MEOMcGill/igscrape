@@ -43,9 +43,17 @@ for Facebook, [pytok](https://github.com/networkdynamics/pytok) for TikTok and
 | Accounts recommended alongside a handle | `scraper.chaining(handle)` | `igscrape scrape chaining <handle>...` |
 | Posts from keyword search | `scraper.search(keyword, max_posts=N)` | `igscrape scrape search <keyword>...` |
 | The logged-in account's own home feed, in feed order | `session.home_feed(max_posts=N)` | `igscrape scrape home-feed <account>...` |
+| Accounts a pool account follows | `scraper.following()` or `session.following()` | `igscrape following <account>` |
+| Follow accounts as a pool account | `session.follow(handle)` | `igscrape follow <account> <handle>...` |
 
 Every call returns a `ScrapingResult` with `.posts`, `.users`, `.result` (a
 result code, see below), `.time_started`, and `.time_taken`.
+`following()` puts the accounts in `.users`; `follow()` puts its status
+(`followed`, `requested`, `already following`, ...) in `.result` and raises
+`RateLimitError` when Instagram blocks the follow. `follow` is only offered on
+a session, so it always acts as the account you opened. The `session.*` rows
+work on a desktop `BrowserSession` or on a farm handset's `PhoneSession`; the
+follow-graph CLI commands take `--phone <adb serial>` for the latter.
 
 ## Install
 

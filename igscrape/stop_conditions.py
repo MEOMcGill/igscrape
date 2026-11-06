@@ -1,4 +1,5 @@
-"""Pluggable stop conditions for the capture-replay pagination loop.
+"""Pluggable stop conditions for the capture-replay pagination loop, also
+used by the home-feed scroll loop (home_feed.scroll_feed).
 
 Ported from fbscrape's `stop_conditions.py` and adapted to igscrape's
 result-code taxonomy (see models.ScrapingResult). Each condition is a small
@@ -18,17 +19,17 @@ from .logger import logger
 class StopState:
     """Snapshot of one pagination iteration, passed to every condition."""
 
-    iter_index: int
-    cursor_sent: str | None  # cursor used for THIS request; None on bootstrap
-    end_cursor: str | None  # cursor returned by THIS response
-    has_next_page: bool
-    new_count: int  # newly-added (deduped) posts this iteration
-    all_count: int  # total unique posts collected so far
-    oldest_in_batch_unix: int | None  # min taken_at among this batch's posts
-    timestamped_count: int  # how many new posts had a readable timestamp
-    error: str | None  # in-body GraphQL error message, if any
-    start_unix: int | None  # user-requested start date (UserTimeline only)
-    no_progress_streak: int  # consecutive iterations with new_count == 0
+    iter_index: int = 0
+    cursor_sent: str | None = None  # cursor used for THIS request; None on bootstrap
+    end_cursor: str | None = None  # cursor returned by THIS response
+    has_next_page: bool = True
+    new_count: int = 0  # newly-added (deduped) posts this iteration
+    all_count: int = 0  # total unique posts collected so far
+    oldest_in_batch_unix: int | None = None  # min taken_at among this batch's posts
+    timestamped_count: int = 0  # how many new posts had a readable timestamp
+    error: str | None = None  # in-body GraphQL error message, if any
+    start_unix: int | None = None  # user-requested start date (UserTimeline only)
+    no_progress_streak: int = 0  # consecutive iterations with new_count == 0
     # Whether the response carried a post connection object at all — i.e. the
     # server resolved the field we asked for (response.has_post_connection).
     # Defaults True so a caller that cannot determine it gets the pre-existing

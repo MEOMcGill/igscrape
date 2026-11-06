@@ -6,11 +6,14 @@ Commands:
                        reset-scrolls, set-cookies, export-cookies
   Asset downloading:   download-images, download-videos
   Scraping:            scrape user-timeline / user-profile / post / chaining
+  Follow graph:        following, follow
 """
 
 import asyncio
+import contextlib
 import json
 import os
+import random
 import re
 from datetime import datetime
 
@@ -19,7 +22,7 @@ from tabulate import tabulate
 
 from .accounts_pool import AccountsPool
 from .downloaders import download_images_from_posts, download_videos_from_posts
-from .exceptions import FailedLoginError
+from .exceptions import FailedLoginError, RateLimitError
 from .exporter import export_posts, flatten_paths
 from .logger import set_log_level
 from .parsers import post_flattener
@@ -873,6 +876,121 @@ def scrape_home_feed(ctx, accounts, max_posts, max_scrolls, output_dir, headless
             path = os.path.join(output_dir, f"{name}_HomeFeed_{stamp}.json")
             result.save(path)
             click.echo(f"{name}: {result.result} ({len(result.posts)} posts) -> {path}")
+
+    run_async(_run())
+
+
+# ============== Follow graph ==============
+
+
+@contextlib.asynccontextmanager
+async def _account_session(pool, name, phone, ssh_host, headless):
+    """Claim pool account `name` and open a desktop browser, or the handset
+    `phone`, logged in as it. Yields None if the account isn't available."""
+    account = await pool.get_available(name)
+    if account is None:
+        click.echo(f"{name}: not available (inactive, locked, in use, or unknown).")
+        yield None
+        return
+    try:
+        if phone:
+            from .phone_session import PhoneSession
+
+            async with PhoneSession(phone, account, pool, ssh_host=ssh_host) as session:
+                yield session
+        else:
+            from .browser_session import BrowserSession
+
+            async with BrowserSession(account, pool, headless=headless) as session:
+                yield session
+    finally:
+        await pool.release_account(name)
+
+
+_device_options = [
+    click.option(
+        "--phone", default=None, help="adb serial of a farm handset to use instead of a desktop"
+    ),
+    click.option("--ssh-host", default=None, help="SSH host the phones hang off, if not local"),
+    click.option("--headless", is_flag=True, help="Desktop browser only"),
+]
+
+
+def device_options(f):
+    """--phone / --ssh-host / --headless, for commands that use _account_session."""
+    for option in reversed(_device_options):
+        f = option(f)
+    return f
+
+
+@cli.command()
+@click.argument("account")
+@click.option("--max-users", default=-1, type=int, help="Stop after N accounts (-1: no cap)")
+@click.option("--output", default=None, help="Save the result (accounts in .users) here as JSON")
+@device_options
+@click.option("--log-level", default="INFO")
+@click.pass_context
+def following(ctx, account, max_users, output, phone, ssh_host, headless, log_level):
+    """List the accounts pool ACCOUNT follows."""
+    set_log_level(log_level)
+
+    async def _run():
+        pool = AccountsPool(ctx.obj["db"])
+        async with _account_session(pool, account, phone, ssh_host, headless) as session:
+            if session is None:
+                return
+            try:
+                result = await session.following(max_users=max_users)
+            except (FailedLoginError, RateLimitError) as e:
+                click.echo(f"{account}: {e}")
+                return
+        click.echo(f"{account} follows {len(result.users)} accounts")
+        for u in result.users:
+            click.echo(f"  {u.get('username')}\t{u.get('full_name') or ''}")
+        if output:
+            result.save(output)
+            click.echo(f"-> {output}")
+
+    run_async(_run())
+
+
+@cli.command()
+@click.argument("account")
+@click.argument("handles", nargs=-1, required=True)
+@click.option("--pause", default=(30.0, 90.0), type=(float, float), show_default=True,
+              help="Random wait between follows, in seconds (min max)")
+@device_options
+@click.option("--log-level", default="INFO")
+@click.pass_context
+def follow(ctx, account, handles, pause, phone, ssh_host, headless, log_level):
+    """Have pool ACCOUNT follow each of HANDLES, one at a time."""
+    set_log_level(log_level)
+
+    from .worker import RETRY_MINUTES
+
+    async def _run():
+        pool = AccountsPool(ctx.obj["db"])
+        async with _account_session(pool, account, phone, ssh_host, headless) as session:
+            if session is None:
+                return
+            for i, handle in enumerate(handles):
+                if i:
+                    await asyncio.sleep(random.uniform(*pause))
+                try:
+                    result = await session.follow(handle)
+                except FailedLoginError as e:
+                    click.echo(f"{account}: {e}")
+                    return
+                except RateLimitError as e:
+                    await pool.lock_until(
+                        account, f"datetime('now', '+{RETRY_MINUTES} minutes')"
+                    )
+                    click.echo(
+                        f"{account} -> {handle}: {e}. Locked {account} for "
+                        f"{RETRY_MINUTES} min; stopping."
+                    )
+                    return
+                click.echo(f"{account} -> {handle}: {result.result}")
 
     run_async(_run())
 

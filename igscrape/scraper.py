@@ -202,6 +202,18 @@ class InstagramScraper:
             )
         )
 
+    async def following(self, max_users: int = -1) -> ScrapingResult:
+        """The accounts followed by whichever pool account the task lands on,
+        in `result.users`; that account is `result.query.query["account"]`.
+
+        Following someone is deliberately not offered here: a worker that
+        rotates accounts on failure would retry it as a different account. Use
+        `BrowserSession.follow` / `PhoneSession.follow` or `igscrape follow`.
+        """
+        return await self._submit(
+            Query(endpoint="Following", query={"max_users": max_users}, params={})
+        )
+
     async def close(self):
         if self.worker_pool:
             await self.worker_pool.close()

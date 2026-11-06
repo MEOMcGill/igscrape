@@ -1,5 +1,8 @@
 """Scroll a logged-in account's home feed and record what it serves.
 
+Collection is real scrolling, not capture-replay like the other endpoints, so
+the feed recorded is the one the account is shown as it scrolls.
+
 Transport-agnostic: the desktop BrowserSession and the phone PhoneSession each
 supply their own `scroll_once` and feed responses into the same interceptor, so
 the stop logic and the embedded-first-page parsing live here once.
@@ -20,6 +23,11 @@ from .stop_conditions import MaxPaginations, MaxPostsReached, NoNewPostsStreak, 
 # nothing; this counts scrolls, not pages.
 HOME_FEED_NO_PROGRESS_STREAK = 20
 HOME_FEED_MAX_SCROLLS = 500
+# A single scroll that takes longer than this means the page is wedged.
+SCROLL_TIMEOUT_SECONDS = 60.0
+# A longer pause every N scrolls, as a reader would take.
+BREATHER_EVERY_N_SCROLLS = 50
+BREATHER_SECONDS = (20.0, 40.0)
 
 # The first feed page is server-rendered into the HTML rather than fetched by
 # XHR. Returns the inline JSON scripts that carry it, as a JSON array string.
@@ -84,13 +92,18 @@ async def scroll_feed(
     max_scrolls: int = HOME_FEED_MAX_SCROLLS,
     max_no_progress_streak: int = HOME_FEED_NO_PROGRESS_STREAK,
     dwell: tuple[float, float] = (1.5, 4.0),
+    scroll_timeout: float = SCROLL_TIMEOUT_SECONDS,
+    breather_every: int = BREATHER_EVERY_N_SCROLLS,
+    breather: tuple[float, float] = BREATHER_SECONDS,
     label: str = "home_feed",
     on_scroll: Callable[[], Awaitable[None]] | None = None,
 ) -> str:
     """Scroll until a stop condition fires and return its result code.
 
     New posts are counted off `interceptor`, which the caller's transport keeps
-    fed while this scrolls. `dwell` is the pause after each scroll, in seconds.
+    fed while this scrolls. `dwell` is the pause after each scroll and
+    `breather` the longer pause every `breather_every` scrolls, in seconds. A
+    scroll that outlasts `scroll_timeout` ends the run with 'timeout error'.
     """
     conditions = assemble_home_feed_stop_conditions(
         max_posts, max_scrolls, max_no_progress_streak
@@ -99,7 +112,11 @@ async def scroll_feed(
     streak = 0
     scroll_index = 0
     while True:
-        await scroll_once()
+        try:
+            await asyncio.wait_for(scroll_once(), timeout=scroll_timeout)
+        except asyncio.TimeoutError:
+            logger.warning(f"{label}: scroll #{scroll_index} hung past {scroll_timeout:.0f}s")
+            return "timeout error"
         await asyncio.sleep(random.uniform(*dwell))
 
         total = len(interceptor.post_metadata_list)
@@ -111,15 +128,8 @@ async def scroll_feed(
 
         state = StopState(
             iter_index=scroll_index + 1,  # scrolls done, so max_scrolls is exact
-            cursor_sent=None,
-            end_cursor=None,
-            has_next_page=True,
             new_count=new,
             all_count=total,
-            oldest_in_batch_unix=None,
-            timestamped_count=new,
-            error=None,
-            start_unix=None,
             no_progress_streak=streak,
         )
         for cond in conditions:
@@ -128,5 +138,9 @@ async def scroll_feed(
                 return code
 
         scroll_index += 1
+        if breather_every and scroll_index % breather_every == 0:
+            pause = random.uniform(*breather)
+            logger.info(f"{label}: {total} posts, {scroll_index} scrolls; pausing {pause:.0f}s")
+            await asyncio.sleep(pause)
         if on_scroll is not None:
             await on_scroll()
