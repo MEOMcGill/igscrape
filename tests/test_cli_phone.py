@@ -27,10 +27,11 @@ class FakePool:
 class FakePhoneSession:
     opened: list[dict] = []
 
-    def __init__(self, serial, account, pool, *, ssh_host=None, cdp_port=9222, **_):
+    def __init__(self, serial, account, pool, *, ssh_host=None, cdp_port=9222,
+                 sleep_on_exit=False, **_):
         FakePhoneSession.opened.append(
             {"serial": serial, "account": account.username, "ssh_host": ssh_host,
-             "cdp_port": cdp_port}
+             "cdp_port": cdp_port, "sleep_on_exit": sleep_on_exit}
         )
         self.response_interceptor = type("I", (), {"drain_hooks": staticmethod(_noop)})()
 
@@ -71,7 +72,8 @@ def test_home_feed_on_a_phone(pool, tmp_path):
             "--output-dir", str(tmp_path))
     assert r.exit_code == 0, r.output
     assert FakePhoneSession.opened == [
-        {"serial": "SER1", "account": "dave", "ssh_host": None, "cdp_port": 9233}
+        {"serial": "SER1", "account": "dave", "ssh_host": None, "cdp_port": 9233,
+         "sleep_on_exit": True}
     ]
     assert "dave: success (0 posts)" in r.output
     assert list(tmp_path.glob("dave_HomeFeed_*.json"))

@@ -858,8 +858,10 @@ async def _account_session(pool, name, phone, ssh_host, headless, cdp_port=DEFAU
         if phone:
             from .phone_session import PhoneSession
 
+            # Back to sleep afterwards: an awake phone showing Chrome reads as in use.
             async with PhoneSession(
-                phone, account, pool, ssh_host=ssh_host, cdp_port=cdp_port
+                phone, account, pool, ssh_host=ssh_host, cdp_port=cdp_port,
+                sleep_on_exit=True,
             ) as session:
                 yield session
         else:
