@@ -22,7 +22,7 @@ from .account import Account
 from .accounts_pool import AccountsPool
 from .browser_session import BASE_URL, BrowserSession
 from .exceptions import FailedLoginError
-from .follow_graph import MOBILE_WEB_APP_ID, follow_result, following_result
+from .follow_graph import MOBILE_WEB_APP_ID, follow_result, following_result, unfollow_result
 from .home_feed import (
     EMBEDDED_FEED_JS,
     HOME_FEED_MAX_SCROLLS,
@@ -332,6 +332,20 @@ class PhoneSession:
         await self._logged_in_tab()
         try:
             return await follow_result(
+                handle,
+                query={"account": self.account.username, "device": self.serial},
+                goto=self._goto,
+                evaluate_json=self._evaluate_json,
+                click=self._tap,
+            )
+        finally:
+            await self.save_cookies()
+
+    async def unfollow(self, handle: str) -> ScrapingResult:
+        """Unfollow `handle` with taps on its profile; see follow_graph.unfollow for codes."""
+        await self._logged_in_tab()
+        try:
+            return await unfollow_result(
                 handle,
                 query={"account": self.account.username, "device": self.serial},
                 goto=self._goto,

@@ -27,9 +27,10 @@ def _page(users, next_max_id=None, status=200):
 class FakeDriver:
     """Answers the viewer probe, then serves following pages or profile states."""
 
-    def __init__(self, pages=(), states=(), user_id="42"):
+    def __init__(self, pages=(), states=(), user_id="42", menu=None):
         self.pages = list(pages)
         self.states = list(states)
+        self.menu = {"x": 30, "y": 40} if menu is None else menu
         self.user_id = user_id
         self.requests = []
         self.visits = []
@@ -43,6 +44,8 @@ class FakeDriver:
             return {"user_id": self.user_id, "app_id": ""}
         if expression == fg._PROFILE_STATE_JS:
             return self.states.pop(0) if len(self.states) > 1 else self.states[0]
+        if expression == fg._UNFOLLOW_ITEM_JS:
+            return self.menu
         self.requests.append(expression)
         return self.pages.pop(0)
 
@@ -170,8 +173,80 @@ def test_follow_result_carries_the_status():
     assert result.query.query == {"account": "me", "handle": "someone"}
 
 
-def test_worker_routes_following_but_not_follow():
+def _unfollow(driver, handle, **kw):
+    return fg.unfollow(
+        handle, goto=driver.goto, evaluate_json=driver.evaluate_json, click=driver.click, **kw
+    )
+
+
+def test_unfollow_clicks_button_then_menu_item_and_confirms_on_reload():
+    driver = FakeDriver(states=[_state("following"), _state("follow"), _state("follow")])
+    assert asyncio.run(_unfollow(driver, "@someone")) == "unfollowed"
+    assert driver.clicks == [(10, 20), (30, 40)]
+    assert driver.visits == ["https://www.instagram.com/someone/"] * 2
+
+
+def test_unfollow_withdraws_a_pending_request():
+    driver = FakeDriver(states=[_state("requested"), _state("follow"), _state("follow")])
+    assert asyncio.run(_unfollow(driver, "someone")) == "request withdrawn"
+
+
+def test_unfollow_that_reverts_on_reload_is_a_block():
+    driver = FakeDriver(states=[_state("following"), _state("follow"), _state("following")])
+    with pytest.raises(RateLimitError):
+        asyncio.run(_unfollow(driver, "someone"))
+
+
+@pytest.mark.parametrize(
+    "state, code",
+    [
+        (_state("follow"), "not following"),
+        ({"state": None, "unavailable": True}, "profile is not available"),
+    ],
+)
+def test_unfollow_does_not_click_when_nothing_to_do(state, code):
+    driver = FakeDriver(states=[state])
+    assert asyncio.run(_unfollow(driver, "someone")) == code
+    assert driver.clicks == []
+
+
+def test_unfollow_without_menu_item_stops_after_one_click():
+    driver = FakeDriver(states=[_state("following")], menu={})
+    assert asyncio.run(_unfollow(driver, "someone")) == "no unfollow option"
+    assert driver.clicks == [(10, 20)]
+
+
+@pytest.mark.parametrize(
+    "states",
+    [
+        [{"state": None, "blocked": True}],
+        [_state("following"), _state("following", blocked=True)],
+    ],
+)
+def test_unfollow_action_block_raises(states):
+    with pytest.raises(RateLimitError):
+        asyncio.run(_unfollow(FakeDriver(states=states), "someone"))
+
+
+def test_unfollow_result_carries_the_status():
+    driver = FakeDriver(states=[_state("following"), _state("follow"), _state("follow")])
+    result = asyncio.run(
+        fg.unfollow_result(
+            "someone",
+            query={"account": "me"},
+            goto=driver.goto,
+            evaluate_json=driver.evaluate_json,
+            click=driver.click,
+        )
+    )
+    assert result.result == "unfollowed"
+    assert result.query.endpoint == "Unfollow"
+    assert result.query.query == {"account": "me", "handle": "someone"}
+
+
+def test_worker_routes_following_but_not_follow_or_unfollow():
     from igscrape.worker import Worker
 
     assert Worker.ENDPOINT_METHODS["Following"] == "following"
     assert "Follow" not in Worker.ENDPOINT_METHODS
+    assert "Unfollow" not in Worker.ENDPOINT_METHODS

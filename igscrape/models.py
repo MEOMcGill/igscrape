@@ -31,6 +31,7 @@ class Query:
         "HomeFeed": [],
         "Following": [],
         "Follow": ["handle"],
+        "Unfollow": ["handle"],
     }
 
     endpoint: str
@@ -94,6 +95,8 @@ class ScrapingResult:
         - 'success' (for single-shot endpoints like UserProfile / PostByShortcode / Chaining)
         - Follow only: 'followed', 'requested', 'already following',
           'already requested', 'no follow button'
+        - Unfollow only: 'unfollowed', 'request withdrawn', 'not following',
+          'no follow button', 'no unfollow option'
     """
 
     query: Query
