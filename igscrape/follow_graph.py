@@ -1,11 +1,12 @@
-"""Read who the logged-in account follows, and follow accounts as it.
+"""Read who the logged-in account follows, and follow or unfollow accounts as it.
 
 Transport-agnostic: BrowserSession and PhoneSession each pass in their own
 `goto`, `evaluate_json` and `click`, and the logic lives here once.
 
 The following list is read with an in-page `fetch` of the web API (outside the
 page the same URL answers 200 with an HTML shell). Following someone is a real
-click or tap on the profile's Follow button, checked by reloading the profile.
+click or tap on the profile's Follow button, checked by reloading the profile;
+unfollowing is the same, through the menu the Following button opens.
 """
 
 from __future__ import annotations
@@ -166,19 +167,73 @@ async def list_following(
         await asyncio.sleep(random.uniform(*pause))
 
 
+# The Unfollow item in the menu (or, for a pending request, the confirmation)
+# that the header's Following / Requested button opens.
+_UNFOLLOW_ITEM_JS = """(() => {
+  const scopes = [...document.querySelectorAll('[role="dialog"]'), document];
+  for (const scope of scopes) {
+    for (const el of scope.querySelectorAll('button, [role="button"]')) {
+      if ((el.innerText || '').trim().toLowerCase() !== 'unfollow') continue;
+      const r = el.getBoundingClientRect();
+      if (!r.width || !r.height) continue;
+      return JSON.stringify({x: r.x + r.width / 2, y: r.y + r.height / 2});
+    }
+  }
+  return JSON.stringify({});
+})()"""
+
+
+async def _poll(evaluate_json: EvaluateJson, expression: str, timeout: float, until) -> dict:
+    """Evaluate `expression` once a second until `until(result)` or timeout."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    result: dict = {}
+    while loop.time() < deadline:
+        result = await evaluate_json(expression)
+        if until(result):
+            return result
+        await asyncio.sleep(1.0)
+    return result
+
+
 async def _profile_state(
     evaluate_json: EvaluateJson, timeout: float, until=lambda s: s.get("state")
 ) -> dict:
     """Poll the profile's follow-button state until `until(state)` or timeout."""
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    state: dict = {}
-    while loop.time() < deadline:
-        state = await evaluate_json(_PROFILE_STATE_JS)
-        if until(state) or state.get("blocked") or state.get("unavailable"):
-            return state
-        await asyncio.sleep(1.0)
-    return state
+    return await _poll(
+        evaluate_json, _PROFILE_STATE_JS, timeout,
+        lambda s: until(s) or s.get("blocked") or s.get("unavailable"),
+    )
+
+
+async def _open_profile(
+    handle: str, goto: Callable[[str], Awaitable[None]], evaluate_json: EvaluateJson,
+    load_timeout: float, action: str,
+) -> tuple[str, dict]:
+    """Load `handle`'s profile and return (url, follow-button state)."""
+    url = f"{BASE_URL}{handle}/"
+    await goto(url)
+    state = await _profile_state(evaluate_json, load_timeout)
+    if state.get("blocked"):
+        raise RateLimitError(f"{action} @{handle}: action blocked")
+    return url, state
+
+
+async def _state_after_reload(
+    url: str, handle: str, goto: Callable[[str], Awaitable[None]],
+    evaluate_json: EvaluateJson, load_timeout: float, action: str,
+) -> str | None:
+    """The follow-button state on a fresh load of the profile.
+
+    The button flips optimistically, and a blocked action flips back later,
+    so only a reload says whether it stuck.
+    """
+    await asyncio.sleep(random.uniform(3.0, 6.0))
+    await goto(url)
+    final = await _profile_state(evaluate_json, load_timeout)
+    if final.get("blocked"):
+        raise RateLimitError(f"{action} @{handle}: action blocked")
+    return final.get("state")
 
 
 async def follow(
@@ -198,13 +253,9 @@ async def follow(
     blocks the follow, whether openly or by reverting it.
     """
     handle = handle.lstrip("@").strip()
-    url = f"{BASE_URL}{handle}/"
-    await goto(url)
-    state = await _profile_state(evaluate_json, load_timeout)
+    url, state = await _open_profile(handle, goto, evaluate_json, load_timeout, "follow")
     if state.get("unavailable"):
         return "profile is not available"
-    if state.get("blocked"):
-        raise RateLimitError(f"follow @{handle}: action blocked")
     current = state.get("state")
     if current == "following":
         return "already following"
@@ -221,20 +272,55 @@ async def follow(
     if after.get("blocked"):
         raise RateLimitError(f"follow @{handle}: action blocked")
 
-    # The button flips optimistically, and a blocked follow flips back later,
-    # so trust only what a fresh load of the profile shows.
-    await asyncio.sleep(random.uniform(3.0, 6.0))
-    await goto(url)
-    final = await _profile_state(evaluate_json, load_timeout)
-    if final.get("blocked"):
-        raise RateLimitError(f"follow @{handle}: action blocked")
-    if final.get("state") == "following":
+    final = await _state_after_reload(url, handle, goto, evaluate_json, load_timeout, "follow")
+    if final == "following":
         return "followed"
-    if final.get("state") == "requested":
+    if final == "requested":
         return "requested"
-    raise RateLimitError(
-        f"follow @{handle}: reverted to {final.get('state')!r} after reload"
-    )
+    raise RateLimitError(f"follow @{handle}: reverted to {final!r} after reload")
+
+
+async def unfollow(
+    handle: str,
+    *,
+    goto: Callable[[str], Awaitable[None]],
+    evaluate_json: EvaluateJson,
+    click: Callable[[float, float], Awaitable[None]],
+    load_timeout: float = 25.0,
+) -> str:
+    """Unfollow `handle`, or withdraw a pending follow request: click the
+    profile's Following / Requested button, then Unfollow in what it opens.
+
+    Returns one of: 'unfollowed', 'request withdrawn', 'not following',
+    'profile is not available', 'no follow button', 'no unfollow option' (the
+    menu opened without one). Raises RateLimitError when Instagram blocks the
+    unfollow, whether openly or by reverting it.
+    """
+    handle = handle.lstrip("@").strip()
+    url, state = await _open_profile(handle, goto, evaluate_json, load_timeout, "unfollow")
+    if state.get("unavailable"):
+        return "profile is not available"
+    current = state.get("state")
+    if current == "follow":
+        return "not following"
+    if current not in ("following", "requested"):
+        return "no follow button"
+
+    await asyncio.sleep(random.uniform(0.8, 2.5))
+    await click(state["x"], state["y"])
+    item = await _poll(evaluate_json, _UNFOLLOW_ITEM_JS, 10.0, until=lambda s: "x" in s)
+    if "x" not in item:
+        return "no unfollow option"
+    await asyncio.sleep(random.uniform(0.5, 1.5))
+    await click(item["x"], item["y"])
+    after = await _profile_state(evaluate_json, 10.0, until=lambda s: s.get("state") == "follow")
+    if after.get("blocked"):
+        raise RateLimitError(f"unfollow @{handle}: action blocked")
+
+    final = await _state_after_reload(url, handle, goto, evaluate_json, load_timeout, "unfollow")
+    if final == "follow":
+        return "request withdrawn" if current == "requested" else "unfollowed"
+    raise RateLimitError(f"unfollow @{handle}: reverted to {final!r} after reload")
 
 
 async def following_result(
@@ -271,6 +357,25 @@ async def follow_result(
     code = await follow(handle, goto=goto, evaluate_json=evaluate_json, click=click)
     return ScrapingResult(
         query=Query(endpoint="Follow", query={**query, "handle": handle}, params={}),
+        result=code,
+        time_started=start,
+        time_taken=datetime.now(timezone.utc) - start,
+    )
+
+
+async def unfollow_result(
+    handle: str,
+    *,
+    query: dict,
+    goto: Callable[[str], Awaitable[None]],
+    evaluate_json: EvaluateJson,
+    click: Callable[[float, float], Awaitable[None]],
+) -> ScrapingResult:
+    """unfollow() as an Unfollow ScrapingResult, its status in `.result`."""
+    start = datetime.now(timezone.utc)
+    code = await unfollow(handle, goto=goto, evaluate_json=evaluate_json, click=click)
+    return ScrapingResult(
+        query=Query(endpoint="Unfollow", query={**query, "handle": handle}, params={}),
         result=code,
         time_started=start,
         time_taken=datetime.now(timezone.utc) - start,

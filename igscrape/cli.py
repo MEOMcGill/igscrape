@@ -6,7 +6,7 @@ Commands:
                        reset-scrolls, set-cookies, export-cookies
   Asset downloading:   download-images, download-videos
   Scraping:            scrape user-timeline / user-profile / post / chaining
-  Follow graph:        following, follow
+  Follow graph:        following, follow, unfollow
 """
 
 import asyncio
@@ -970,18 +970,9 @@ def following(ctx, account, max_users, output, phone, ssh_host, cdp_port, headle
     run_async(_run())
 
 
-@cli.command()
-@click.argument("account")
-@click.argument("handles", nargs=-1, required=True)
-@click.option("--pause", default=(30.0, 90.0), type=(float, float), show_default=True,
-              help="Random wait between follows, in seconds (min max)")
-@device_options
-@click.option("--log-level", default="INFO")
-@click.pass_context
-def follow(ctx, account, handles, pause, phone, ssh_host, cdp_port, headless, log_level):
-    """Have pool ACCOUNT follow each of HANDLES, one at a time."""
-    set_log_level(log_level)
-
+def _follow_each(ctx, account, handles, pause, phone, ssh_host, cdp_port, headless, action):
+    """Run session.<action>(handle) for each handle as pool `account`, pausing
+    between them; on a block, lock the account and stop."""
     from .worker import RETRY_MINUTES
 
     async def _run():
@@ -995,7 +986,7 @@ def follow(ctx, account, handles, pause, phone, ssh_host, cdp_port, headless, lo
                 if i:
                     await asyncio.sleep(random.uniform(*pause))
                 try:
-                    result = await session.follow(handle)
+                    result = await getattr(session, action)(handle)
                 except FailedLoginError as e:
                     click.echo(f"{account}: {e}")
                     return
@@ -1011,6 +1002,34 @@ def follow(ctx, account, handles, pause, phone, ssh_host, cdp_port, headless, lo
                 click.echo(f"{account} -> {handle}: {result.result}")
 
     run_async(_run())
+
+
+@cli.command()
+@click.argument("account")
+@click.argument("handles", nargs=-1, required=True)
+@click.option("--pause", default=(30.0, 90.0), type=(float, float), show_default=True,
+              help="Random wait between follows, in seconds (min max)")
+@device_options
+@click.option("--log-level", default="INFO")
+@click.pass_context
+def follow(ctx, account, handles, pause, phone, ssh_host, cdp_port, headless, log_level):
+    """Have pool ACCOUNT follow each of HANDLES, one at a time."""
+    set_log_level(log_level)
+    _follow_each(ctx, account, handles, pause, phone, ssh_host, cdp_port, headless, "follow")
+
+
+@cli.command()
+@click.argument("account")
+@click.argument("handles", nargs=-1, required=True)
+@click.option("--pause", default=(30.0, 90.0), type=(float, float), show_default=True,
+              help="Random wait between unfollows, in seconds (min max)")
+@device_options
+@click.option("--log-level", default="INFO")
+@click.pass_context
+def unfollow(ctx, account, handles, pause, phone, ssh_host, cdp_port, headless, log_level):
+    """Have pool ACCOUNT unfollow each of HANDLES (or withdraw pending requests), one at a time."""
+    set_log_level(log_level)
+    _follow_each(ctx, account, handles, pause, phone, ssh_host, cdp_port, headless, "unfollow")
 
 
 # ============== Asset downloading ==============

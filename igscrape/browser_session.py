@@ -34,7 +34,7 @@ from .accounts_pool import AccountsPool
 from .downloaders import download_videos_from_posts
 from .exceptions import FailedLoginError, RateLimitError
 from .exporter import append_jsonl
-from .follow_graph import DESKTOP_APP_ID, follow_result, following_result
+from .follow_graph import DESKTOP_APP_ID, follow_result, following_result, unfollow_result
 from .home_feed import (
     EMBEDDED_FEED_JS,
     HOME_FEED_MAX_SCROLLS,
@@ -1588,6 +1588,19 @@ class BrowserSession:
         await self._on_logged_in_page()
         await self._dismiss_not_now()
         return await follow_result(
+            handle,
+            query={"account": self.account.username},
+            goto=self._goto,
+            evaluate_json=self._evaluate_json,
+            click=self.page.mouse.click,
+        )
+
+    async def unfollow(self, handle: str) -> ScrapingResult:
+        """Unfollow `handle` from its profile page; see follow_graph.unfollow for codes."""
+        self.endpoint = "Unfollow"
+        await self._on_logged_in_page()
+        await self._dismiss_not_now()
+        return await unfollow_result(
             handle,
             query={"account": self.account.username},
             goto=self._goto,
