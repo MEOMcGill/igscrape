@@ -53,7 +53,8 @@ result code, see below), `.time_started`, and `.time_taken`.
 `RateLimitError` when Instagram blocks the follow. `follow` is only offered on
 a session, so it always acts as the account you opened. The `session.*` rows
 work on a desktop `BrowserSession` or on a farm handset's `PhoneSession`; the
-follow-graph CLI commands take `--phone <adb serial>` for the latter.
+home-feed and follow-graph CLI commands take `--phone <adb serial>` for the latter,
+and `--cdp-port` when another phone's DevTools forward already holds 9222.
 
 ## Install
 

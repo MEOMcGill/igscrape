@@ -15,6 +15,7 @@ import json
 import os
 import random
 import re
+import sys
 from datetime import datetime
 
 import click
@@ -26,6 +27,7 @@ from .exceptions import FailedLoginError, RateLimitError
 from .exporter import export_posts, flatten_paths
 from .logger import set_log_level
 from .parsers import post_flattener
+from .phone_transport import DEFAULT_CDP_PORT
 from .utils import gather, get_home_dir_path
 
 
@@ -44,6 +46,10 @@ def cli(ctx, db):
     """igscrape — Instagram scraper CLI."""
     ctx.ensure_object(dict)
     ctx.obj["db"] = db or get_default_db()
+    # A Windows console or ssh pipe is cp1252; names with emoji would raise mid-output.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
 
 
 # ============== Account management ==============
@@ -836,55 +842,11 @@ def scrape_search(ctx, keywords, max_posts, output_dir, max_sessions, headless, 
     )
 
 
-@scrape.command("home-feed")
-@click.argument("accounts", nargs=-1, required=True)
-@click.option("--max-posts", default=100, type=int, help="Stop after N posts (-1: no cap)")
-@click.option("--max-scrolls", default=500, type=int)
-@click.option("--output-dir", default=None)
-@click.option("--headless", is_flag=True)
-@click.option("--log-level", default="INFO")
-@click.pass_context
-def scrape_home_feed(ctx, accounts, max_posts, max_scrolls, output_dir, headless, log_level):
-    """Scroll the home feed of each pool ACCOUNT (by username), one at a time."""
-    from .browser_session import BrowserSession
-
-    set_log_level(log_level)
-    if output_dir is None:
-        output_dir = os.path.join(get_home_dir_path(), "data", "HomeFeed")
-    os.makedirs(output_dir, exist_ok=True)
-
-    async def _run():
-        pool = AccountsPool(ctx.obj["db"])
-        for name in accounts:
-            account = await pool.get_available(name)
-            if account is None:
-                click.echo(f"{name}: not available (inactive, locked, in use, or unknown).")
-                continue
-            try:
-                async with BrowserSession(account, pool, headless=headless) as session:
-                    result = await session.home_feed(
-                        max_posts=max_posts, max_scrolls=max_scrolls
-                    )
-                    await session.response_interceptor.drain_hooks()
-            except FailedLoginError as e:
-                click.echo(f"{name}: login failed: {e}")
-                continue
-            finally:
-                await pool.release_account(name)
-            result.posts = post_flattener(result.posts)
-            stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
-            path = os.path.join(output_dir, f"{name}_HomeFeed_{stamp}.json")
-            result.save(path)
-            click.echo(f"{name}: {result.result} ({len(result.posts)} posts) -> {path}")
-
-    run_async(_run())
-
-
 # ============== Follow graph ==============
 
 
 @contextlib.asynccontextmanager
-async def _account_session(pool, name, phone, ssh_host, headless):
+async def _account_session(pool, name, phone, ssh_host, headless, cdp_port=DEFAULT_CDP_PORT):
     """Claim pool account `name` and open a desktop browser, or the handset
     `phone`, logged in as it. Yields None if the account isn't available."""
     account = await pool.get_available(name)
@@ -896,7 +858,11 @@ async def _account_session(pool, name, phone, ssh_host, headless):
         if phone:
             from .phone_session import PhoneSession
 
-            async with PhoneSession(phone, account, pool, ssh_host=ssh_host) as session:
+            # Back to sleep afterwards: an awake phone showing Chrome reads as in use.
+            async with PhoneSession(
+                phone, account, pool, ssh_host=ssh_host, cdp_port=cdp_port,
+                sleep_on_exit=True,
+            ) as session:
                 yield session
         else:
             from .browser_session import BrowserSession
@@ -912,15 +878,62 @@ _device_options = [
         "--phone", default=None, help="adb serial of a farm handset to use instead of a desktop"
     ),
     click.option("--ssh-host", default=None, help="SSH host the phones hang off, if not local"),
+    click.option(
+        "--cdp-port", default=DEFAULT_CDP_PORT, type=int, show_default=True,
+        help="Host-side port for the phone's DevTools; give each phone in use its own",
+    ),
     click.option("--headless", is_flag=True, help="Desktop browser only"),
 ]
 
 
 def device_options(f):
-    """--phone / --ssh-host / --headless, for commands that use _account_session."""
+    """--phone / --ssh-host / --cdp-port / --headless, for commands that use _account_session."""
     for option in reversed(_device_options):
         f = option(f)
     return f
+
+
+@scrape.command("home-feed")
+@click.argument("accounts", nargs=-1, required=True)
+@click.option("--max-posts", default=100, type=int, help="Stop after N posts (-1: no cap)")
+@click.option("--max-scrolls", default=500, type=int)
+@click.option("--output-dir", default=None)
+@device_options
+@click.option("--log-level", default="INFO")
+@click.pass_context
+def scrape_home_feed(
+    ctx, accounts, max_posts, max_scrolls, output_dir, phone, ssh_host, cdp_port, headless,
+    log_level,
+):
+    """Scroll the home feed of each pool ACCOUNT (by username), one at a time."""
+    set_log_level(log_level)
+    if output_dir is None:
+        output_dir = os.path.join(get_home_dir_path(), "data", "HomeFeed")
+    os.makedirs(output_dir, exist_ok=True)
+
+    async def _run():
+        pool = AccountsPool(ctx.obj["db"])
+        for name in accounts:
+            try:
+                async with _account_session(
+                    pool, name, phone, ssh_host, headless, cdp_port
+                ) as session:
+                    if session is None:
+                        continue
+                    result = await session.home_feed(
+                        max_posts=max_posts, max_scrolls=max_scrolls
+                    )
+                    await session.response_interceptor.drain_hooks()
+            except FailedLoginError as e:
+                click.echo(f"{name}: login failed: {e}")
+                continue
+            result.posts = post_flattener(result.posts)
+            stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+            path = os.path.join(output_dir, f"{name}_HomeFeed_{stamp}.json")
+            result.save(path)
+            click.echo(f"{name}: {result.result} ({len(result.posts)} posts) -> {path}")
+
+    run_async(_run())
 
 
 @cli.command()
@@ -930,13 +943,15 @@ def device_options(f):
 @device_options
 @click.option("--log-level", default="INFO")
 @click.pass_context
-def following(ctx, account, max_users, output, phone, ssh_host, headless, log_level):
+def following(ctx, account, max_users, output, phone, ssh_host, cdp_port, headless, log_level):
     """List the accounts pool ACCOUNT follows."""
     set_log_level(log_level)
 
     async def _run():
         pool = AccountsPool(ctx.obj["db"])
-        async with _account_session(pool, account, phone, ssh_host, headless) as session:
+        async with _account_session(
+            pool, account, phone, ssh_host, headless, cdp_port
+        ) as session:
             if session is None:
                 return
             try:
@@ -944,11 +959,12 @@ def following(ctx, account, max_users, output, phone, ssh_host, headless, log_le
             except (FailedLoginError, RateLimitError) as e:
                 click.echo(f"{account}: {e}")
                 return
+        if output:
+            result.save(output)
         click.echo(f"{account} follows {len(result.users)} accounts")
         for u in result.users:
             click.echo(f"  {u.get('username')}\t{u.get('full_name') or ''}")
         if output:
-            result.save(output)
             click.echo(f"-> {output}")
 
     run_async(_run())
@@ -962,7 +978,7 @@ def following(ctx, account, max_users, output, phone, ssh_host, headless, log_le
 @device_options
 @click.option("--log-level", default="INFO")
 @click.pass_context
-def follow(ctx, account, handles, pause, phone, ssh_host, headless, log_level):
+def follow(ctx, account, handles, pause, phone, ssh_host, cdp_port, headless, log_level):
     """Have pool ACCOUNT follow each of HANDLES, one at a time."""
     set_log_level(log_level)
 
@@ -970,7 +986,9 @@ def follow(ctx, account, handles, pause, phone, ssh_host, headless, log_level):
 
     async def _run():
         pool = AccountsPool(ctx.obj["db"])
-        async with _account_session(pool, account, phone, ssh_host, headless) as session:
+        async with _account_session(
+            pool, account, phone, ssh_host, headless, cdp_port
+        ) as session:
             if session is None:
                 return
             for i, handle in enumerate(handles):
